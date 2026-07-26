@@ -60,6 +60,22 @@ export class RoomGateway implements OnGatewayDisconnect {
     }
 
     handleDisconnect(socket: Socket): void {
+        this.cleanupPeer(socket);
+    }
+
+    /** Explicit "I'm done with this room" signal — distinct from a real socket disconnect
+     *  because SocketConnection is a page-wide singleton that the playback route reuses
+     *  (recordings dropdown -> playback navigates within the same SPA, same socket). Without
+     *  this, navigating away only tore down state locally; the server never learned the peer
+     *  left, so its producers/transports stayed open and other peers were left looking at a
+     *  frozen last frame instead of getting a producer-closed/peer-left broadcast. */
+    @SubscribeMessage('leave-room')
+    onLeaveRoom(@ConnectedSocket() socket: Socket): { ok: true } {
+        this.cleanupPeer(socket);
+        return { ok: true };
+    }
+
+    private cleanupPeer(socket: Socket): void {
         const closed = this.roomService.closePeer(socket.id);
         if (!closed) {
             return;
@@ -68,6 +84,9 @@ export class RoomGateway implements OnGatewayDisconnect {
             socket.to(closed.roomName).emit('producer-closed', { producerId });
         }
         socket.to(closed.roomName).emit('peer-left', { peerId: socket.id, displayName: closed.displayName });
+        // No-op on a socket that's already disconnecting; matters for the still-connected
+        // leave-room path so a later join-room on this same socket starts from a clean slate.
+        void socket.leave(closed.roomName);
     }
 
     @SubscribeMessage('join-room')
