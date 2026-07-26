@@ -307,6 +307,15 @@ export class RecordingService {
                         '-n',
                         '-protocol_whitelist',
                         'file,udp,rtp',
+                        // Without this, ffmpeg trusts the RTP stream's raw 90kHz clock timestamps
+                        // as-is, which — combined with no explicit output frame rate below — led it
+                        // to infer a bogus ~90000fps output cadence and pad tens of thousands of
+                        // duplicate frames into a couple hundred milliseconds of container duration
+                        // (players then show 0:00/no scrubber, since that IS the file's real
+                        // declared duration). Wall-clock timestamps reflect when packets actually
+                        // arrived instead.
+                        '-use_wallclock_as_timestamps',
+                        '1',
                         '-i',
                         sdpPath,
                         '-c:v',
@@ -327,6 +336,13 @@ export class RecordingService {
                         // can flush nothing at all (moov atom not found).
                         '-force_key_frames',
                         'expr:gte(t,n_forced*2)',
+                        // Pins the OUTPUT to a real, fixed frame rate — the other half of the
+                        // duplicate-frame/bogus-duration fix above. Without this, ffmpeg still has
+                        // to guess an output cadence from the (now wall-clock) input timestamps.
+                        '-r',
+                        '30',
+                        '-fps_mode',
+                        'cfr',
                         // empty_moov means this recording target has no upfront duration
                         // index — needed for resilience against an abrupt kill, but it's
                         // why players show 0:00/no scrubber. finalizeVideoSession remuxes
@@ -447,7 +463,10 @@ export class RecordingService {
 
                 const args = ['-n'];
                 for (const input of inputs) {
-                    args.push('-protocol_whitelist', 'file,udp,rtp', '-i', input.sdpPath);
+                    // Same rationale as the video path: wall-clock timestamps instead of trusting
+                    // the RTP stream's raw clock avoids ffmpeg mis-deriving a bogus duration for
+                    // the mixed track, which matters even more here with multiple inputs feeding amix.
+                    args.push('-use_wallclock_as_timestamps', '1', '-protocol_whitelist', 'file,udp,rtp', '-i', input.sdpPath);
                 }
                 args.push(
                     '-filter_complex',
