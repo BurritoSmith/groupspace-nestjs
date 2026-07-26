@@ -1,0 +1,36 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./recordings:/recordings
+
+  caddy:
+    image: caddy:2
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  coturn:
+    image: coturn/coturn:4.6
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: >
+      -c /etc/coturn/turnserver.conf
+      --external-ip=${VM_PUBLIC_IP}
+      --static-auth-secret=${TURN_SECRET}
+
+volumes:
+  caddy_data:
+  caddy_config:
