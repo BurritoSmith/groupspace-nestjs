@@ -40,6 +40,12 @@ export class RecordingService {
     private readonly portMax = Number(process.env.RECORDING_PORT_MAX ?? 45199);
     private readonly recordingsDir = process.env.RECORDINGS_DIR ?? path.join(process.cwd(), 'recordings');
     private readonly sdpScratchDir = path.join(os.tmpdir(), 'spaces-recording-sdp');
+    // Plain 'ffmpeg' relies on PATH, which is correct in the deployed Docker image (installed via
+    // apt-get) — but some local Windows dev setups (notably VS Code's integrated terminal, which
+    // inherits its environment from the VS Code process rather than re-reading it live) don't pick
+    // up a PATH change until a full process restart. FFMPEG_PATH lets local dev point directly at
+    // the binary without fighting that.
+    private readonly ffmpegPath = process.env.FFMPEG_PATH ?? 'ffmpeg';
 
     isRecording(roomName: string): boolean {
         return this.rooms.has(roomName);
@@ -170,8 +176,7 @@ export class RecordingService {
                 this.buildFilename(state.roomName, info.displayName, info.source, streamNumber, timestamp),
             );
 
-            const ffmpeg = spawn(
-                'ffmpeg',
+            const ffmpeg = await this.spawnFfmpegAndWaitReady(
                 [
                     '-n',
                     '-protocol_whitelist',
@@ -182,16 +187,32 @@ export class RecordingService {
                     'libx264',
                     '-preset',
                     'veryfast',
+                    // Disables B-frames/lookahead buffering — without this, x264 can
+                    // hold several frames internally before any encoded output is
+                    // available to write at all, regardless of forced keyframe timing.
+                    // A stream stopped within that first ~second could flush nothing
+                    // even with a keyframe forced at t=0.
+                    '-tune',
+                    'zerolatency',
+                    // Forces a keyframe (and therefore a flushed fragment, since
+                    // frag_keyframe below fragments AT each keyframe) every 2s
+                    // starting at t=0 — without this, libx264's default ~8-10s
+                    // keyframe interval means a stream stopped shortly after starting
+                    // can flush nothing at all (moov atom not found).
+                    '-force_key_frames',
+                    'expr:gte(t,n_forced*2)',
+                    // empty_moov means this recording target has no upfront duration
+                    // index — needed for resilience against an abrupt kill, but it's
+                    // why players show 0:00/no scrubber. finalizeVideoSession remuxes
+                    // this temp file into a normal indexed mp4 at outputPath once the
+                    // stream stops, which is what actually gets kept.
                     '-movflags',
                     '+frag_keyframe+empty_moov+faststart',
-                    outputPath,
+                    this.tempRecordingPath(outputPath),
                 ],
-                { stdio: ['pipe', 'ignore', 'pipe'] },
+                `video ${info.producerId}`,
             );
-            ffmpeg.stderr?.on('data', (chunk: Buffer) => this.logger.debug(`[ffmpeg ${info.producerId}] ${chunk}`));
 
-            // Let ffmpeg's UDP listener bind before mediasoup starts sending, so the first packets aren't dropped.
-            await new Promise((resolve) => setTimeout(resolve, 300));
             await consumer.resume();
             await consumer.requestKeyFrame();
 
@@ -220,6 +241,7 @@ export class RecordingService {
         session.transport.close();
         this.releasePort(session.destPort);
         void fs.unlink(session.sdpPath).catch(() => undefined);
+        await this.remuxToFinalFile(this.tempRecordingPath(session.outputPath), session.outputPath);
     }
 
     private async startAudioMix(
@@ -269,14 +291,17 @@ export class RecordingService {
                 'aac',
                 '-b:a',
                 '128k',
+                // Audio has no keyframe concept, and this track's duration is
+                // unpredictable (an amix restart can be very short-lived) — fragment
+                // after literally every AAC frame (~21ms) rather than on a timer, so
+                // even a mic that's on for under a second still flushes something
+                // valid rather than producing an empty/unremuxable temp file.
                 '-movflags',
-                '+frag_keyframe+empty_moov+faststart',
-                outputPath,
+                '+frag_every_frame+empty_moov+faststart',
+                this.tempRecordingPath(outputPath),
             );
-            const ffmpeg = spawn('ffmpeg', args, { stdio: ['pipe', 'ignore', 'pipe'] });
-            ffmpeg.stderr?.on('data', (chunk: Buffer) => this.logger.debug(`[ffmpeg audio-mix ${state.roomName}] ${chunk}`));
+            const ffmpeg = await this.spawnFfmpegAndWaitReady(args, `audio-mix ${state.roomName}`);
 
-            await new Promise((resolve) => setTimeout(resolve, 300));
             for (const input of inputs) {
                 await input.consumer.resume();
             }
@@ -314,6 +339,7 @@ export class RecordingService {
             this.releasePort(input.destPort);
             void fs.unlink(input.sdpPath).catch(() => undefined);
         }
+        await this.remuxToFinalFile(this.tempRecordingPath(mix.outputPath), mix.outputPath);
     }
 
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
@@ -321,6 +347,115 @@ export class RecordingService {
             ...[...state.videoSessions.values()].map((session) => this.finalizeVideoSession(session)),
             this.withAudioMixLock(state, () => (state.audioMix ? this.finalizeAudioMix(state.audioMix) : Promise.resolve())),
         ]);
+    }
+
+    /**
+     * Spawns ffmpeg and waits ~300ms for it to bind its listening socket before
+     * mediasoup starts sending (so the first packets/keyframe aren't dropped).
+     * Critically, this also attaches an 'error' listener for the entire life of
+     * the process — child_process.spawn() doesn't throw synchronously if the
+     * binary is missing (e.g. ffmpeg not installed/on PATH); it emits 'error'
+     * asynchronously instead, and Node re-throws an unhandled 'error' event as
+     * an uncaught exception, which crashes the whole process (every socket in
+     * every room disconnects). Without this listener, a single missing ffmpeg
+     * binary or bad argument takes down the entire server, not just this one
+     * recording attempt.
+     */
+    private spawnFfmpegAndWaitReady(args: string[], logLabel: string): Promise<ChildProcess> {
+        return new Promise((resolve, reject) => {
+            const ffmpeg = spawn(this.ffmpegPath, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+            let settled = false;
+
+            const onStartupError = (error: Error) => {
+                this.logger.error(`ffmpeg (${logLabel}) failed to start: ${error.message}`);
+                if (!settled) {
+                    settled = true;
+                    reject(error);
+                }
+            };
+            const onStartupExit = (code: number | null, signal: NodeJS.Signals | null) => {
+                if (!settled) {
+                    settled = true;
+                    reject(new Error(`ffmpeg (${logLabel}) exited immediately (code=${code}, signal=${signal})`));
+                }
+            };
+
+            ffmpeg.once('error', onStartupError);
+            ffmpeg.once('exit', onStartupExit);
+            ffmpeg.stderr?.on('data', (chunk: Buffer) => this.logger.debug(`[ffmpeg ${logLabel}] ${chunk}`));
+
+            setTimeout(() => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                ffmpeg.removeListener('error', onStartupError);
+                ffmpeg.removeListener('exit', onStartupExit);
+                // Long-lived handler for the rest of this process's life, so a later
+                // crash (e.g. OOM-killed) logs instead of taking the server down.
+                ffmpeg.on('error', (error) => this.logger.error(`ffmpeg (${logLabel}) error after startup: ${error.message}`));
+                resolve(ffmpeg);
+            }, 300);
+        });
+    }
+
+    /**
+     * The live recording writes to a temp fragmented mp4 (empty_moov — no
+     * upfront duration index, but resilient to an abrupt kill). Once that
+     * process has exited, this does a fast `-c copy` remux into the real,
+     * final path WITHOUT empty_moov — a normal mp4 with correct top-level
+     * duration/seek metadata, since ffmpeg's demuxer can read the fragmented
+     * temp file's actual total duration even though it has no central index.
+     * Best-effort: logs and keeps the temp file (rather than throwing) if the
+     * remux itself fails, so a stop/close action never fails because of this.
+     */
+    private async remuxToFinalFile(tempPath: string, finalPath: string): Promise<void> {
+        try {
+            const stat = await fs.stat(tempPath).catch(() => null);
+            if (!stat || stat.size === 0) {
+                this.logger.warn(`Recording temp file ${tempPath} is missing or empty — nothing to remux`);
+                return;
+            }
+            await this.runFfmpegToCompletion(
+                ['-y', '-i', tempPath, '-c', 'copy', '-movflags', '+faststart', finalPath],
+                `remux ${path.basename(finalPath)}`,
+            );
+            void fs.unlink(tempPath).catch(() => undefined);
+        } catch (error) {
+            this.logger.error(
+                `Failed to remux ${tempPath} -> ${finalPath} (temp file kept): ${error instanceof Error ? error.message : error}`,
+            );
+        }
+    }
+
+    private tempRecordingPath(finalPath: string): string {
+        return finalPath.replace(/\.mp4$/, '.recording.mp4');
+    }
+
+    /** Runs ffmpeg on a finite local-file input to completion (unlike spawnFfmpegAndWaitReady, which is for live RTP input and never awaits full completion). */
+    private runFfmpegToCompletion(args: string[], logLabel: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const ffmpeg = spawn(this.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+            let settled = false;
+            ffmpeg.once('error', (error) => {
+                if (!settled) {
+                    settled = true;
+                    reject(error);
+                }
+            });
+            ffmpeg.stderr?.on('data', (chunk: Buffer) => this.logger.debug(`[ffmpeg ${logLabel}] ${chunk}`));
+            ffmpeg.once('exit', (code, signal) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                if (code === 0) {
+                    resolve();
+                } else {
+                    reject(new Error(`ffmpeg (${logLabel}) exited with code=${code} signal=${signal}`));
+                }
+            });
+        });
     }
 
     private stopFfmpegGracefully(proc: ChildProcess, timeoutMs = 5000): Promise<void> {

@@ -123,18 +123,22 @@ export class RoomGateway implements OnGatewayDisconnect {
 
     @SubscribeMessage('start-recording')
     async onStartRecording(@ConnectedSocket() socket: Socket) {
+        // Returns { ok: false, error } rather than throwing on failure — NestJS's
+        // WS gateway only fills the client's ack callback when a handler RETURNS
+        // a value; a thrown WsException is routed to a separate 'exception' event
+        // instead, leaving the client's emitWithAck() promise unresolved forever.
         const roomName = socket.data.roomName as string | undefined;
         if (!roomName) {
-            throw new WsException('Not in a room.');
+            return { ok: false, error: 'Not in a room.' };
         }
         const snapshot = this.roomService.getRecordingSnapshot(roomName);
         if (!snapshot) {
-            throw new WsException('Room not found.');
+            return { ok: false, error: 'Room not found.' };
         }
         try {
             await this.recordingService.start(roomName, snapshot);
         } catch (error) {
-            throw new WsException(error instanceof Error ? error.message : 'Failed to start recording.');
+            return { ok: false, error: error instanceof Error ? error.message : 'Failed to start recording.' };
         }
         return { ok: true };
     }
@@ -143,7 +147,7 @@ export class RoomGateway implements OnGatewayDisconnect {
     async onStopRecording(@ConnectedSocket() socket: Socket) {
         const roomName = socket.data.roomName as string | undefined;
         if (!roomName) {
-            throw new WsException('Not in a room.');
+            return { ok: false, error: 'Not in a room.' };
         }
         await this.recordingService.stop(roomName);
         return { ok: true };
