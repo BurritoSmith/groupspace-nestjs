@@ -99,7 +99,9 @@ export class RecordingService {
                 filename: recording.filename,
                 streamType: recording.streamType,
                 displayName: recording.displayName,
-                url: await this.getSignedUrl(recording.gcsPath),
+                // GCS-configured deployments (production) link to the signed cloud URL; local
+                // dev has no bucket, so link to the file main.ts serves straight off disk.
+                url: this.gcsBucketName ? await this.getSignedUrl(recording.gcsPath) : this.buildLocalFileUrl(recording.filename),
             })),
         );
         return {
@@ -128,6 +130,14 @@ export class RecordingService {
             this.logger.error(`Failed to sign URL for gs://${this.gcsBucketName}/${gcsPath}: ${error}`);
             return null;
         }
+    }
+
+    /** Points at the static route main.ts mounts over recordingsDir — local-dev-only,
+     *  since production always has RECORDINGS_GCS_BUCKET configured and uses getSignedUrl
+     *  instead. localhost is correct here because in local dev the frontend and backend
+     *  always run on the same machine. */
+    private buildLocalFileUrl(filename: string): string {
+        return `http://localhost:${process.env.PORT ?? 3001}/recordings/${encodeURIComponent(filename)}`;
     }
 
     /** Starts recording every currently active producer in the room. Throws if already recording. */
@@ -683,8 +693,19 @@ export class RecordingService {
         });
     }
 
+    /**
+     * Only ever hands out even ports. RTP conventionally pairs with an adjacent RTCP port
+     * (RTP on an even port, RTCP on port+1) — even though both sides of this pipeline
+     * request rtcp-mux, ffmpeg's SDP-based rtp demuxer still opens (and holds for the
+     * entire life of the process) a companion socket on destPort+1 regardless. Handing out
+     * odd ports here would eventually assign one recording's destPort to the exact port
+     * another, unrelated, still-active recording's ffmpeg is already squatting on for RTCP
+     * — a real bind collision that only appears once two recordings overlap and disappears
+     * by the time anyone looks afterward, which is what made this so hard to pin down.
+     */
     private allocatePort(): number {
-        for (let port = this.portMin; port <= this.portMax; port++) {
+        const firstEven = this.portMin % 2 === 0 ? this.portMin : this.portMin + 1;
+        for (let port = firstEven; port + 1 <= this.portMax; port += 2) {
             if (!this.usedPorts.has(port)) {
                 this.usedPorts.add(port);
                 return port;

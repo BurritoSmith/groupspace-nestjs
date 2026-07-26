@@ -58,9 +58,9 @@ export interface IRecordingSummary {
     filename: string;
     streamType: string;
     displayName: string;
-    /** Signed, time-limited URL to the file in Cloud Storage — generated fresh on every
-     *  read (never persisted, since signed URLs expire), null when RECORDINGS_GCS_BUCKET
-     *  isn't configured (local dev) or the object has no gcsPath for some other reason. */
+    /** A signed, time-limited Cloud Storage URL when RECORDINGS_GCS_BUCKET is configured
+     *  (production), or a link to the file served straight off local disk otherwise (local
+     *  dev). Only null if the recording has no gcsPath and GCS isn't configured either. */
     url: string | null;
 }
 
