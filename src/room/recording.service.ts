@@ -611,9 +611,13 @@ export class RecordingService {
 
     /** Uploads a finalized local recording to Cloud Storage at <roomName>/<sessionName>/<filename>,
      *  deleting the local copy on success — RECORDINGS_GCS_BUCKET moves storage off the VM's disk
-     *  entirely, it isn't a backup/mirror. Returns the object path, or null if GCS isn't configured
-     *  (local dev) or the upload failed (local file is kept in that case, matching this file's
-     *  established "never lose a recording over a best-effort step" philosophy). */
+     *  entirely, it isn't a backup/mirror. Returns the deterministic object path whenever GCS is
+     *  configured, even if THIS upload attempt failed (local file is kept in that case, matching
+     *  this file's established "never lose a recording over a best-effort step" philosophy) — a
+     *  signed URL built from that path is a pure cryptographic signature, it doesn't require the
+     *  object to already exist, so the playback page can show a link immediately and it'll simply
+     *  start working once the object lands (this upload succeeding, or a future manual retry).
+     *  Returns null only when GCS isn't configured at all (local dev). */
     private async uploadToGcsIfConfigured(localPath: string, roomName: string, sessionName: string): Promise<string | null> {
         if (!this.storage || !this.gcsBucketName) {
             return null;
@@ -622,13 +626,12 @@ export class RecordingService {
         try {
             await this.storage.bucket(this.gcsBucketName).upload(localPath, { destination: objectPath });
             void fs.unlink(localPath).catch(() => undefined);
-            return objectPath;
         } catch (error) {
             this.logger.error(
                 `Failed to upload ${localPath} to gs://${this.gcsBucketName}/${objectPath} (local file kept): ${error}`,
             );
-            return null;
         }
+        return objectPath;
     }
 
     private tempRecordingPath(finalPath: string): string {
