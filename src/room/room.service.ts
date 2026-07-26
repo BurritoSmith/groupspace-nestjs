@@ -108,9 +108,10 @@ export class RoomService implements OnModuleInit {
     async joinRoom(
         peerId: string,
         roomName: string,
+        userId: string,
         displayName: string,
         pictureUrl: string,
-    ): Promise<Omit<IJoinRoomResult, 'iceServers'>> {
+    ): Promise<Omit<IJoinRoomResult, 'iceServers' | 'userId' | 'chatHistory' | 'hasMoreChatHistory'>> {
         const router = await this.getOrCreateRouter(roomName);
         const peers: IPeerSummary[] = [];
         const existingProducers: IProducerSummary[] = [];
@@ -133,6 +134,7 @@ export class RoomService implements OnModuleInit {
 
         this.peers.set(peerId, {
             peerId,
+            userId,
             displayName,
             pictureUrl,
             roomName,
@@ -210,6 +212,7 @@ export class RoomService implements OnModuleInit {
             this.recordingService.notifyProducerCreated(peer.roomName, peer.router, {
                 producerId: producer.id,
                 peerId: peer.peerId,
+                userId: peer.userId,
                 displayName: peer.displayName,
                 source,
             });
@@ -316,7 +319,7 @@ export class RoomService implements OnModuleInit {
                 continue;
             }
             for (const { producer, source } of peer.producers.values()) {
-                producers.push({ producerId: producer.id, peerId: peer.peerId, displayName: peer.displayName, source });
+                producers.push({ producerId: producer.id, peerId: peer.peerId, userId: peer.userId, displayName: peer.displayName, source });
             }
         }
         return { router, producers };
@@ -330,7 +333,7 @@ export class RoomService implements OnModuleInit {
             }
             for (const { producer, source } of peer.producers.values()) {
                 if (source === 'mic') {
-                    result.push({ producerId: producer.id, peerId: peer.peerId, displayName: peer.displayName, source });
+                    result.push({ producerId: producer.id, peerId: peer.peerId, userId: peer.userId, displayName: peer.displayName, source });
                 }
             }
         }

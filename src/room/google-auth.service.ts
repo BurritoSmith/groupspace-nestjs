@@ -7,6 +7,8 @@ import { OAuth2Client } from 'google-auth-library';
 const GOOGLE_CLIENT_ID = '370019109527-0e02va07coeguv0mj7ohnsd8pfsklda8.apps.googleusercontent.com';
 
 export interface IGoogleProfile {
+    googleSub: string;
+    email: string;
     displayName: string;
     pictureUrl: string;
 }
@@ -22,10 +24,15 @@ export class GoogleAuthService {
         try {
             const ticket = await this.client.verifyIdToken({ idToken, audience: GOOGLE_CLIENT_ID });
             const payload = ticket.getPayload();
-            if (!payload?.name) {
+            if (!payload?.name || !payload.sub) {
                 return null;
             }
-            return { displayName: payload.name, pictureUrl: payload.picture ?? '' };
+            return {
+                googleSub: payload.sub,
+                email: payload.email ?? '',
+                displayName: payload.name,
+                pictureUrl: payload.picture ?? '',
+            };
         } catch {
             return null;
         }

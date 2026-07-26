@@ -4,7 +4,8 @@ import { ITurnCredentials } from '../turn-credentials.service';
 export type StreamSource = 'webcam' | 'screen' | 'mic';
 
 export interface IChatMessage {
-    peerId: string;
+    id: string;
+    userId: string;
     displayName: string;
     text: string;
     at: string;
@@ -31,9 +32,12 @@ export interface IJoinRoomPayload {
 
 export interface IJoinRoomResult {
     peerId: string;
+    userId: string;
     routerRtpCapabilities: mediasoupTypes.RtpCapabilities;
     peers: IPeerSummary[];
     existingProducers: IProducerSummary[];
+    chatHistory: IChatMessage[];
+    hasMoreChatHistory: boolean;
     iceServers: ITurnCredentials[];
 }
 
@@ -94,6 +98,7 @@ export interface IPeerProducerRecord {
 /** Per-connected-socket server-side state. */
 export interface IPeerState {
     peerId: string;
+    userId: string;
     displayName: string;
     pictureUrl: string;
     roomName: string;

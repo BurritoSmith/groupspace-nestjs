@@ -8,12 +8,15 @@ import {
     WebSocketServer,
     WsException,
 } from '@nestjs/websockets';
+import { randomUUID } from 'node:crypto';
 import { Server, Socket } from 'socket.io';
 import { getAllowedOrigins } from '../config/cors-origins';
+import { ChatService, HISTORY_PAGE_SIZE } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
 import { RecordingService } from './recording.service';
 import { RoomService } from './room.service';
 import { TurnCredentialsService } from './turn-credentials.service';
+import { UsersService } from './users.service';
 import type {
     IChatMessage,
     IChatMessagePayload,
@@ -45,6 +48,8 @@ export class RoomGateway implements OnGatewayDisconnect {
         private readonly turnCredentialsService: TurnCredentialsService,
         private readonly googleAuthService: GoogleAuthService,
         private readonly recordingService: RecordingService,
+        private readonly usersService: UsersService,
+        private readonly chatService: ChatService,
     ) {
         this.roomService.events.on('active-speakers', ({ roomName, peerIds }: { roomName: string; peerIds: string[] }) => {
             this.server.to(roomName).emit('active-speakers', { peerIds });
@@ -71,14 +76,23 @@ export class RoomGateway implements OnGatewayDisconnect {
         if (!profile) {
             throw new WsException('Google sign-in could not be verified.');
         }
+        const user = await this.usersService.upsertFromGoogleProfile(profile);
         const roomName = payload.roomName?.trim() || 'lobby';
-        const result = await this.roomService.joinRoom(socket.id, roomName, profile.displayName, profile.pictureUrl);
+        const result = await this.roomService.joinRoom(socket.id, roomName, user.id, profile.displayName, profile.pictureUrl);
         await socket.join(roomName);
         socket.data.roomName = roomName;
         socket.data.displayName = profile.displayName;
+        socket.data.userId = user.id;
         socket.to(roomName).emit('peer-joined', { peerId: socket.id, displayName: profile.displayName, pictureUrl: profile.pictureUrl });
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
-        return { ...result, iceServers: turnCredentials ? [turnCredentials] : [] };
+        const chatHistory = await this.chatService.getRecentHistory(roomName);
+        return {
+            ...result,
+            userId: user.id,
+            chatHistory,
+            hasMoreChatHistory: chatHistory.length === HISTORY_PAGE_SIZE,
+            iceServers: turnCredentials ? [turnCredentials] : [],
+        };
     }
 
     @SubscribeMessage('create-transport')
@@ -144,27 +158,66 @@ export class RoomGateway implements OnGatewayDisconnect {
     }
 
     @SubscribeMessage('stop-recording')
-    async onStopRecording(@ConnectedSocket() socket: Socket) {
+    async onStopRecording(@ConnectedSocket() socket: Socket, @MessageBody() payload: { name?: string }) {
         const roomName = socket.data.roomName as string | undefined;
         if (!roomName) {
             return { ok: false, error: 'Not in a room.' };
         }
-        await this.recordingService.stop(roomName);
+        await this.recordingService.stop(roomName, payload?.name?.trim() || undefined);
         return { ok: true };
+    }
+
+    @SubscribeMessage('list-recording-sessions')
+    async onListRecordingSessions(@ConnectedSocket() socket: Socket) {
+        const roomName = socket.data.roomName as string | undefined;
+        if (!roomName) {
+            return { sessions: [] };
+        }
+        try {
+            const sessions = await this.recordingService.listRecentSessions(roomName);
+            return { sessions };
+        } catch (error) {
+            this.logger.error(`Failed to list recording sessions for room ${roomName}: ${error}`);
+            return { sessions: [] };
+        }
+    }
+
+    @SubscribeMessage('get-recording-session')
+    async onGetRecordingSession(@MessageBody() payload: { id: string }) {
+        try {
+            const session = await this.recordingService.getSessionDetail(payload.id);
+            return { session };
+        } catch (error) {
+            this.logger.error(`Failed to load recording session ${payload.id}: ${error}`);
+            return { session: null };
+        }
     }
 
     @SubscribeMessage('chat-message')
     onChatMessage(@ConnectedSocket() socket: Socket, @MessageBody() payload: IChatMessagePayload) {
         const roomName = socket.data.roomName as string;
-        if (!roomName || !payload.text?.trim()) {
+        const userId = socket.data.userId as string;
+        if (!roomName || !userId || !payload.text?.trim()) {
             return;
         }
         const message: IChatMessage = {
-            peerId: socket.id,
+            id: randomUUID(), // generated here so the broadcast doesn't wait on the DB insert
+            userId,
             displayName: socket.data.displayName ?? 'Anonymous',
             text: payload.text.trim(),
             at: new Date().toISOString(),
         };
         this.server.to(roomName).emit('chat-message', message);
+        this.chatService.saveMessage(message.id, roomName, userId, message.displayName, message.text, new Date(message.at));
+    }
+
+    @SubscribeMessage('load-earlier-chat-messages')
+    async onLoadEarlierChatMessages(@ConnectedSocket() socket: Socket, @MessageBody() payload: { before: string }) {
+        const roomName = socket.data.roomName as string | undefined;
+        if (!roomName) {
+            return { messages: [], hasMore: false };
+        }
+        const messages = await this.chatService.getMessagesBefore(roomName, new Date(payload.before));
+        return { messages, hasMore: messages.length === HISTORY_PAGE_SIZE };
     }
 }

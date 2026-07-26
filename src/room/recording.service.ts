@@ -1,14 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ChildProcess, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { types as mediasoupTypes } from 'mediasoup';
+import { PrismaService } from '../prisma/prisma.service';
 import {
     IRecordingAudioInput,
     IRecordingAudioMixSession,
     IRecordingProducerInfo,
+    IRecordingSessionDetail,
+    IRecordingSessionSummary,
     IRecordingSnapshot,
     IRecordingVideoSession,
     IRoomRecordingState,
@@ -47,8 +51,51 @@ export class RecordingService {
     // the binary without fighting that.
     private readonly ffmpegPath = process.env.FFMPEG_PATH ?? 'ffmpeg';
 
+    constructor(private readonly prisma: PrismaService) {}
+
     isRecording(roomName: string): boolean {
         return this.rooms.has(roomName);
+    }
+
+    /** Most recent recording sessions for a room, for the toolbar's recordings dropdown. */
+    async listRecentSessions(roomName: string, limit = 10): Promise<IRecordingSessionSummary[]> {
+        const sessions = await this.prisma.recordingSession.findMany({
+            where: { roomName },
+            orderBy: { startedAt: 'desc' },
+            take: limit,
+        });
+        return sessions.map((session) => ({
+            id: session.id,
+            name: session.name,
+            startedAt: session.startedAt.toISOString(),
+            stoppedAt: session.stoppedAt?.toISOString() ?? null,
+        }));
+    }
+
+    /** One session plus every recording in it — looked up by id alone (not scoped to the
+     *  requesting socket's current room), so a direct navigation/refresh on the playback
+     *  route works even without having joined a room in this connection. */
+    async getSessionDetail(sessionId: string): Promise<IRecordingSessionDetail | null> {
+        const session = await this.prisma.recordingSession.findUnique({
+            where: { id: sessionId },
+            include: { recordings: true },
+        });
+        if (!session) {
+            return null;
+        }
+        return {
+            id: session.id,
+            name: session.name,
+            roomName: session.roomName,
+            startedAt: session.startedAt.toISOString(),
+            stoppedAt: session.stoppedAt?.toISOString() ?? null,
+            recordings: session.recordings.map((recording) => ({
+                id: recording.id,
+                filename: recording.filename,
+                streamType: recording.streamType,
+                displayName: recording.displayName,
+            })),
+        };
     }
 
     /** Starts recording every currently active producer in the room. Throws if already recording. */
@@ -59,8 +106,21 @@ export class RecordingService {
         await fs.mkdir(this.recordingsDir, { recursive: true });
         await fs.mkdir(this.sdpScratchDir, { recursive: true });
 
+        const sessionDbId = randomUUID();
+        await this.prisma.recordingSession.create({
+            data: {
+                id: sessionDbId,
+                room: { connectOrCreate: { where: { name: roomName }, create: { name: roomName } } },
+                // Failsafe default — overwritten if RoomGateway.onStopRecording gets a
+                // user-supplied name from the stop dialog; left as-is for any stop path
+                // that never goes through that dialog (room-empties auto-stop, a crash, etc.).
+                name: this.buildDefaultSessionName(roomName, new Date()),
+            },
+        });
+
         const state: IRoomRecordingState = {
             roomName,
+            sessionDbId,
             videoSessions: new Map(),
             audioMix: null,
             audioMixLock: Promise.resolve(),
@@ -83,14 +143,18 @@ export class RecordingService {
         this.events.emit('recording-state', { roomName, isRecording: true });
     }
 
-    /** Stops recording and finalizes every open file for the room. Idempotent — a no-op if not recording. */
-    async stop(roomName: string): Promise<void> {
+    /** Stops recording and finalizes every open file for the room. Idempotent — a no-op if not recording.
+     *  `name`, if provided (from the stop-recording naming dialog), overwrites the session's failsafe default. */
+    async stop(roomName: string, name?: string): Promise<void> {
         const state = this.rooms.get(roomName);
         if (!state) {
             return;
         }
         this.rooms.delete(roomName);
         await this.teardownRoom(state);
+        await this.prisma.recordingSession
+            .update({ where: { id: state.sessionDbId }, data: { stoppedAt: new Date(), ...(name ? { name } : {}) } })
+            .catch((error: unknown) => this.logger.error(`Failed to finalize recording session ${state.sessionDbId}: ${error}`));
         this.events.emit('recording-state', { roomName, isRecording: false });
     }
 
@@ -216,6 +280,25 @@ export class RecordingService {
             await consumer.resume();
             await consumer.requestKeyFrame();
 
+            const dbId = randomUUID();
+            await this.prisma.recording
+                .create({
+                    data: {
+                        id: dbId,
+                        room: { connectOrCreate: { where: { name: state.roomName }, create: { name: state.roomName } } },
+                        session: { connect: { id: state.sessionDbId } },
+                        user: { connect: { id: info.userId } },
+                        displayName: info.displayName,
+                        streamType: info.source,
+                        streamNumber,
+                        filename: path.basename(outputPath),
+                        startedAt: new Date(),
+                    },
+                })
+                .catch((error: unknown) =>
+                    this.logger.error(`Failed to persist recording metadata for producer ${info.producerId}: ${error}`),
+                );
+
             state.videoSessions.set(info.producerId, {
                 producerId: info.producerId,
                 peerId: info.peerId,
@@ -227,6 +310,7 @@ export class RecordingService {
                 sdpPath,
                 outputPath,
                 ffmpeg,
+                dbId,
             });
         } catch (error) {
             this.releasePort(destPort);
@@ -242,6 +326,9 @@ export class RecordingService {
         this.releasePort(session.destPort);
         void fs.unlink(session.sdpPath).catch(() => undefined);
         await this.remuxToFinalFile(this.tempRecordingPath(session.outputPath), session.outputPath);
+        await this.prisma.recording
+            .update({ where: { id: session.dbId }, data: { stoppedAt: new Date() } })
+            .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for recording ${session.dbId}: ${error}`));
     }
 
     private async startAudioMix(
@@ -306,7 +393,23 @@ export class RecordingService {
                 await input.consumer.resume();
             }
 
-            state.audioMix = { inputs, outputPath, ffmpeg };
+            const dbId = randomUUID();
+            await this.prisma.recording
+                .create({
+                    data: {
+                        id: dbId,
+                        room: { connectOrCreate: { where: { name: state.roomName }, create: { name: state.roomName } } },
+                        session: { connect: { id: state.sessionDbId } },
+                        displayName: 'mixed-audio',
+                        streamType: 'audio',
+                        streamNumber,
+                        filename: path.basename(outputPath),
+                        startedAt: new Date(),
+                    },
+                })
+                .catch((error: unknown) => this.logger.error(`Failed to persist audio-mix recording metadata for room ${state.roomName}: ${error}`));
+
+            state.audioMix = { inputs, outputPath, ffmpeg, dbId };
         } catch (error) {
             for (const input of inputs) {
                 input.consumer.close();
@@ -340,6 +443,9 @@ export class RecordingService {
             void fs.unlink(input.sdpPath).catch(() => undefined);
         }
         await this.remuxToFinalFile(this.tempRecordingPath(mix.outputPath), mix.outputPath);
+        await this.prisma.recording
+            .update({ where: { id: mix.dbId }, data: { stoppedAt: new Date() } })
+            .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for audio-mix recording ${mix.dbId}: ${error}`));
     }
 
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
@@ -529,5 +635,15 @@ export class RecordingService {
 
     private formatTimestampUtc(date: Date): string {
         return date.toISOString().replace(/[-:]/g, '').split('.')[0];
+    }
+
+    /** Human-readable failsafe session name — "<roomname> - MM/DD/YYYY h:mm AM/PM" — distinct
+     *  from formatTimestampUtc's sortable/filesystem-safe format used for filenames. */
+    private buildDefaultSessionName(roomName: string, date: Date): string {
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const year = date.getFullYear();
+        const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+        return `${roomName} - ${month}/${day}/${year} ${time}`;
     }
 }

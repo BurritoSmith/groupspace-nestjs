@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String   @id @default(uuid())
+  googleSub   String   @unique
+  email       String
+  displayName String
+  pictureUrl  String
+  createdAt   DateTime @default(now())
+  lastSeenAt  DateTime @updatedAt // bumped automatically by Prisma on every update()/upsert()-update
+
+  chatMessages ChatMessage[]
+  recordings   Recording[]
+}
+
+model Room {
+  name      String   @id // rooms have no separate UUID anywhere in this app — the name IS the identifier
+  createdAt DateTime @default(now())
+
+  chatMessages      ChatMessage[]
+  recordings        Recording[]
+  recordingSessions RecordingSession[]
+}
+
+// Groups every stream (webcam/screen/audio-mix) produced by one "start recording" ->
+// "stop recording" action, so a future playback component can look up "all streams
+// belonging to this session" and sync them together. `name` starts as the failsafe
+// default (set at start()) and is overwritten with a user-chosen name if the deliberate
+// stop-recording dialog flow supplies one — see RecordingService.start()/stop().
+model RecordingSession {
+  id        String    @id @default(uuid())
+  roomName  String
+  room      Room      @relation(fields: [roomName], references: [name])
+  name      String
+  startedAt DateTime  @default(now())
+  stoppedAt DateTime?
+
+  recordings Recording[]
+
+  @@index([roomName, startedAt])
+}
+
+model ChatMessage {
+  id          String   @id @default(uuid()) // overridden with an app-generated UUID at insert time
+  roomName    String
+  room        Room     @relation(fields: [roomName], references: [name])
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  displayName String // snapshot at send-time — a later Google account rename must not rewrite history
+  text        String
+  sentAt      DateTime @default(now())
+
+  @@index([roomName, sentAt]) // "most recent N in a room" is the only history query needed
+  @@index([userId])
+}
+
+model Recording {
+  id           String           @id @default(uuid())
+  roomName     String
+  room         Room             @relation(fields: [roomName], references: [name])
+  sessionId    String
+  session      RecordingSession @relation(fields: [sessionId], references: [id])
+  userId       String? // nullable — the combined-audio-mix row has no single owning participant
+  user         User?            @relation(fields: [userId], references: [id])
+  displayName  String // snapshot; literal 'mixed-audio' for the audio-mix row
+  streamType   String // 'webcam' | 'screen' | 'audio' — plain String, not a Prisma enum: RecordingService
+  // already treats these as plain string literals, an enum would add migration overhead for no benefit here.
+  streamNumber Int
+  filename     String
+  startedAt    DateTime         @default(now())
+  stoppedAt    DateTime? // null until finalizeVideoSession/finalizeAudioMix runs
+
+  @@index([roomName, startedAt])
+  @@index([userId])
+  @@index([sessionId])
+}

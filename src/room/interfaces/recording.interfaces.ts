@@ -5,6 +5,7 @@ import { StreamSource } from './room.interfaces';
 export interface IRecordingProducerInfo {
     producerId: string;
     peerId: string;
+    userId: string;
     displayName: string;
     source: StreamSource;
 }
@@ -26,6 +27,7 @@ export interface IRecordingVideoSession {
     sdpPath: string;
     outputPath: string;
     ffmpeg: ChildProcess;
+    dbId: string;
 }
 
 export interface IRecordingAudioInput {
@@ -41,10 +43,33 @@ export interface IRecordingAudioMixSession {
     inputs: IRecordingAudioInput[];
     outputPath: string;
     ffmpeg: ChildProcess;
+    dbId: string;
+}
+
+export interface IRecordingSessionSummary {
+    id: string;
+    name: string;
+    startedAt: string;
+    stoppedAt: string | null;
+}
+
+export interface IRecordingSummary {
+    id: string;
+    filename: string;
+    streamType: string;
+    displayName: string;
+}
+
+export interface IRecordingSessionDetail extends IRecordingSessionSummary {
+    roomName: string;
+    recordings: IRecordingSummary[];
 }
 
 export interface IRoomRecordingState {
     roomName: string;
+    // The RecordingSession DB row grouping every stream in this start()/stop() lifecycle
+    // together, for the future playback component to look up "all streams for session X".
+    sessionDbId: string;
     videoSessions: Map<string, IRecordingVideoSession>; // keyed by producerId
     audioMix: IRecordingAudioMixSession | null;
     // Serializes every audio-mix start/restart/finalize for this room onto one
