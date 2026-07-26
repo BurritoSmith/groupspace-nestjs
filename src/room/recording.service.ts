@@ -259,107 +259,125 @@ export class RecordingService {
         router: mediasoupTypes.Router,
         info: IRecordingProducerInfo,
     ): Promise<void> {
-        const transport = await router.createPlainTransport({
-            listenInfo: { protocol: 'udp', ip: '127.0.0.1' },
-            rtcpMux: true,
-            comedia: false,
-        });
-        const destPort = this.allocatePort();
-        try {
-            await transport.connect({ ip: '127.0.0.1', port: destPort });
-            const consumer = await transport.consume({
-                producerId: info.producerId,
-                rtpCapabilities: router.rtpCapabilities,
-                paused: true,
+        const timestamp = this.formatTimestampUtc(new Date());
+        const streamNumber = this.nextStreamNumber(state, `${info.peerId}:${info.source}`);
+        const outputPath = path.join(
+            this.recordingsDir,
+            this.buildFilename(state.roomName, info.displayName, info.source, streamNumber, timestamp),
+        );
+
+        // Retries with a fresh PlainTransport + freshly allocated port on failure — our own
+        // port bookkeeping only tracks what THIS process has handed out, so it can't guarantee
+        // a chosen port is actually free at the OS level (e.g. something outside our control
+        // transiently holding it). A retry with a different port is far more useful than
+        // failing the whole recording over what's very likely a one-off collision.
+        const MAX_ATTEMPTS = 3;
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            const transport = await router.createPlainTransport({
+                listenInfo: { protocol: 'udp', ip: '127.0.0.1' },
+                rtcpMux: true,
+                comedia: false,
             });
-            const codec = consumer.rtpParameters.codecs[0];
-            const sdpPath = path.join(this.sdpScratchDir, `${info.producerId}-${Date.now()}.sdp`);
-            await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, 'video'));
+            const destPort = this.allocatePort();
+            let sdpPath: string | null = null;
+            try {
+                await transport.connect({ ip: '127.0.0.1', port: destPort });
+                const consumer = await transport.consume({
+                    producerId: info.producerId,
+                    rtpCapabilities: router.rtpCapabilities,
+                    paused: true,
+                });
+                const codec = consumer.rtpParameters.codecs[0];
+                sdpPath = path.join(this.sdpScratchDir, `${info.producerId}-${Date.now()}-${attempt}.sdp`);
+                await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, 'video'));
 
-            const timestamp = this.formatTimestampUtc(new Date());
-            const streamNumber = this.nextStreamNumber(state, `${info.peerId}:${info.source}`);
-            const outputPath = path.join(
-                this.recordingsDir,
-                this.buildFilename(state.roomName, info.displayName, info.source, streamNumber, timestamp),
-            );
-
-            const ffmpeg = await this.spawnFfmpegAndWaitReady(
-                [
-                    '-n',
-                    '-protocol_whitelist',
-                    'file,udp,rtp',
-                    '-i',
-                    sdpPath,
-                    '-c:v',
-                    'libx264',
-                    '-preset',
-                    'veryfast',
-                    // Disables B-frames/lookahead buffering — without this, x264 can
-                    // hold several frames internally before any encoded output is
-                    // available to write at all, regardless of forced keyframe timing.
-                    // A stream stopped within that first ~second could flush nothing
-                    // even with a keyframe forced at t=0.
-                    '-tune',
-                    'zerolatency',
-                    // Forces a keyframe (and therefore a flushed fragment, since
-                    // frag_keyframe below fragments AT each keyframe) every 2s
-                    // starting at t=0 — without this, libx264's default ~8-10s
-                    // keyframe interval means a stream stopped shortly after starting
-                    // can flush nothing at all (moov atom not found).
-                    '-force_key_frames',
-                    'expr:gte(t,n_forced*2)',
-                    // empty_moov means this recording target has no upfront duration
-                    // index — needed for resilience against an abrupt kill, but it's
-                    // why players show 0:00/no scrubber. finalizeVideoSession remuxes
-                    // this temp file into a normal indexed mp4 at outputPath once the
-                    // stream stops, which is what actually gets kept.
-                    '-movflags',
-                    '+frag_keyframe+empty_moov+faststart',
-                    this.tempRecordingPath(outputPath),
-                ],
-                `video ${info.producerId}`,
-            );
-
-            await consumer.resume();
-            await consumer.requestKeyFrame();
-
-            const dbId = randomUUID();
-            await this.prisma.recording
-                .create({
-                    data: {
-                        id: dbId,
-                        room: { connectOrCreate: { where: { name: state.roomName }, create: { name: state.roomName } } },
-                        session: { connect: { id: state.sessionDbId } },
-                        user: { connect: { id: info.userId } },
-                        displayName: info.displayName,
-                        streamType: info.source,
-                        streamNumber,
-                        filename: path.basename(outputPath),
-                        startedAt: new Date(),
-                    },
-                })
-                .catch((error: unknown) =>
-                    this.logger.error(`Failed to persist recording metadata for producer ${info.producerId}: ${error}`),
+                const ffmpeg = await this.spawnFfmpegAndWaitReady(
+                    [
+                        '-n',
+                        '-protocol_whitelist',
+                        'file,udp,rtp',
+                        '-i',
+                        sdpPath,
+                        '-c:v',
+                        'libx264',
+                        '-preset',
+                        'veryfast',
+                        // Disables B-frames/lookahead buffering — without this, x264 can
+                        // hold several frames internally before any encoded output is
+                        // available to write at all, regardless of forced keyframe timing.
+                        // A stream stopped within that first ~second could flush nothing
+                        // even with a keyframe forced at t=0.
+                        '-tune',
+                        'zerolatency',
+                        // Forces a keyframe (and therefore a flushed fragment, since
+                        // frag_keyframe below fragments AT each keyframe) every 2s
+                        // starting at t=0 — without this, libx264's default ~8-10s
+                        // keyframe interval means a stream stopped shortly after starting
+                        // can flush nothing at all (moov atom not found).
+                        '-force_key_frames',
+                        'expr:gte(t,n_forced*2)',
+                        // empty_moov means this recording target has no upfront duration
+                        // index — needed for resilience against an abrupt kill, but it's
+                        // why players show 0:00/no scrubber. finalizeVideoSession remuxes
+                        // this temp file into a normal indexed mp4 at outputPath once the
+                        // stream stops, which is what actually gets kept.
+                        '-movflags',
+                        '+frag_keyframe+empty_moov+faststart',
+                        this.tempRecordingPath(outputPath),
+                    ],
+                    `video ${info.producerId} port=${destPort} attempt=${attempt}`,
                 );
 
-            state.videoSessions.set(info.producerId, {
-                producerId: info.producerId,
-                peerId: info.peerId,
-                displayName: info.displayName,
-                source: info.source as 'webcam' | 'screen',
-                transport,
-                consumer,
-                destPort,
-                sdpPath,
-                outputPath,
-                ffmpeg,
-                dbId,
-            });
-        } catch (error) {
-            this.releasePort(destPort);
-            transport.close();
-            throw error;
+                await consumer.resume();
+                await consumer.requestKeyFrame();
+
+                const dbId = randomUUID();
+                await this.prisma.recording
+                    .create({
+                        data: {
+                            id: dbId,
+                            room: { connectOrCreate: { where: { name: state.roomName }, create: { name: state.roomName } } },
+                            session: { connect: { id: state.sessionDbId } },
+                            user: { connect: { id: info.userId } },
+                            displayName: info.displayName,
+                            streamType: info.source,
+                            streamNumber,
+                            filename: path.basename(outputPath),
+                            startedAt: new Date(),
+                        },
+                    })
+                    .catch((error: unknown) =>
+                        this.logger.error(`Failed to persist recording metadata for producer ${info.producerId}: ${error}`),
+                    );
+
+                state.videoSessions.set(info.producerId, {
+                    producerId: info.producerId,
+                    peerId: info.peerId,
+                    displayName: info.displayName,
+                    source: info.source as 'webcam' | 'screen',
+                    transport,
+                    consumer,
+                    destPort,
+                    sdpPath,
+                    outputPath,
+                    ffmpeg,
+                    dbId,
+                });
+                return;
+            } catch (error) {
+                lastError = error;
+                this.releasePort(destPort);
+                transport.close();
+                if (sdpPath) {
+                    void fs.unlink(sdpPath).catch(() => undefined);
+                }
+                this.logger.warn(
+                    `Recording start attempt ${attempt}/${MAX_ATTEMPTS} failed for producer ${info.producerId} (port=${destPort}): ${error instanceof Error ? error.message : error}`,
+                );
+            }
         }
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
     private async finalizeVideoSession(state: IRoomRecordingState, session: IRecordingVideoSession): Promise<void> {
@@ -383,86 +401,98 @@ export class RecordingService {
         if (mics.length === 0) {
             return; // nothing to record yet — wait for the first mic
         }
-        const inputs: IRecordingAudioInput[] = [];
-        try {
-            for (const mic of mics) {
-                const transport = await router.createPlainTransport({
-                    listenInfo: { protocol: 'udp', ip: '127.0.0.1' },
-                    rtcpMux: true,
-                    comedia: false,
-                });
-                const destPort = this.allocatePort();
-                await transport.connect({ ip: '127.0.0.1', port: destPort });
-                const consumer = await transport.consume({
-                    producerId: mic.producerId,
-                    rtpCapabilities: router.rtpCapabilities,
-                    paused: true,
-                });
-                const codec = consumer.rtpParameters.codecs[0];
-                const sdpPath = path.join(this.sdpScratchDir, `${mic.producerId}-${Date.now()}.sdp`);
-                await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, 'audio'));
-                inputs.push({ producerId: mic.producerId, peerId: mic.peerId, transport, consumer, destPort, sdpPath });
+        const timestamp = this.formatTimestampUtc(new Date());
+        const streamNumber = this.nextStreamNumber(state, 'mixed-audio:audio');
+        const outputPath = path.join(
+            this.recordingsDir,
+            this.buildFilename(state.roomName, 'mixed-audio', 'audio', streamNumber, timestamp),
+        );
+
+        // Same rationale as startVideoSession: our port bookkeeping can't guarantee a chosen
+        // port is actually free at the OS level, so retry the whole input set (fresh transports,
+        // fresh ports) if the shared ffmpeg process fails to start.
+        const MAX_ATTEMPTS = 3;
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            const inputs: IRecordingAudioInput[] = [];
+            try {
+                for (const mic of mics) {
+                    const transport = await router.createPlainTransport({
+                        listenInfo: { protocol: 'udp', ip: '127.0.0.1' },
+                        rtcpMux: true,
+                        comedia: false,
+                    });
+                    const destPort = this.allocatePort();
+                    await transport.connect({ ip: '127.0.0.1', port: destPort });
+                    const consumer = await transport.consume({
+                        producerId: mic.producerId,
+                        rtpCapabilities: router.rtpCapabilities,
+                        paused: true,
+                    });
+                    const codec = consumer.rtpParameters.codecs[0];
+                    const sdpPath = path.join(this.sdpScratchDir, `${mic.producerId}-${Date.now()}-${attempt}.sdp`);
+                    await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, 'audio'));
+                    inputs.push({ producerId: mic.producerId, peerId: mic.peerId, transport, consumer, destPort, sdpPath });
+                }
+
+                const args = ['-n'];
+                for (const input of inputs) {
+                    args.push('-protocol_whitelist', 'file,udp,rtp', '-i', input.sdpPath);
+                }
+                args.push(
+                    '-filter_complex',
+                    `amix=inputs=${inputs.length}:duration=longest:dropout_transition=0`,
+                    '-c:a',
+                    'aac',
+                    '-b:a',
+                    '128k',
+                    // Audio has no keyframe concept, and this track's duration is
+                    // unpredictable (an amix restart can be very short-lived) — fragment
+                    // after literally every AAC frame (~21ms) rather than on a timer, so
+                    // even a mic that's on for under a second still flushes something
+                    // valid rather than producing an empty/unremuxable temp file.
+                    '-movflags',
+                    '+frag_every_frame+empty_moov+faststart',
+                    this.tempRecordingPath(outputPath),
+                );
+                const ffmpeg = await this.spawnFfmpegAndWaitReady(args, `audio-mix ${state.roomName} attempt=${attempt}`);
+
+                for (const input of inputs) {
+                    await input.consumer.resume();
+                }
+
+                const dbId = randomUUID();
+                await this.prisma.recording
+                    .create({
+                        data: {
+                            id: dbId,
+                            room: { connectOrCreate: { where: { name: state.roomName }, create: { name: state.roomName } } },
+                            session: { connect: { id: state.sessionDbId } },
+                            displayName: 'mixed-audio',
+                            streamType: 'audio',
+                            streamNumber,
+                            filename: path.basename(outputPath),
+                            startedAt: new Date(),
+                        },
+                    })
+                    .catch((error: unknown) => this.logger.error(`Failed to persist audio-mix recording metadata for room ${state.roomName}: ${error}`));
+
+                state.audioMix = { inputs, outputPath, ffmpeg, dbId };
+                return;
+            } catch (error) {
+                lastError = error;
+                for (const input of inputs) {
+                    input.consumer.close();
+                    input.transport.close();
+                    this.releasePort(input.destPort);
+                    void fs.unlink(input.sdpPath).catch(() => undefined);
+                }
+                this.logger.warn(
+                    `Audio-mix start attempt ${attempt}/${MAX_ATTEMPTS} failed for room ${state.roomName}: ${error instanceof Error ? error.message : error}`,
+                );
             }
-
-            const timestamp = this.formatTimestampUtc(new Date());
-            const streamNumber = this.nextStreamNumber(state, 'mixed-audio:audio');
-            const outputPath = path.join(
-                this.recordingsDir,
-                this.buildFilename(state.roomName, 'mixed-audio', 'audio', streamNumber, timestamp),
-            );
-
-            const args = ['-n'];
-            for (const input of inputs) {
-                args.push('-protocol_whitelist', 'file,udp,rtp', '-i', input.sdpPath);
-            }
-            args.push(
-                '-filter_complex',
-                `amix=inputs=${inputs.length}:duration=longest:dropout_transition=0`,
-                '-c:a',
-                'aac',
-                '-b:a',
-                '128k',
-                // Audio has no keyframe concept, and this track's duration is
-                // unpredictable (an amix restart can be very short-lived) — fragment
-                // after literally every AAC frame (~21ms) rather than on a timer, so
-                // even a mic that's on for under a second still flushes something
-                // valid rather than producing an empty/unremuxable temp file.
-                '-movflags',
-                '+frag_every_frame+empty_moov+faststart',
-                this.tempRecordingPath(outputPath),
-            );
-            const ffmpeg = await this.spawnFfmpegAndWaitReady(args, `audio-mix ${state.roomName}`);
-
-            for (const input of inputs) {
-                await input.consumer.resume();
-            }
-
-            const dbId = randomUUID();
-            await this.prisma.recording
-                .create({
-                    data: {
-                        id: dbId,
-                        room: { connectOrCreate: { where: { name: state.roomName }, create: { name: state.roomName } } },
-                        session: { connect: { id: state.sessionDbId } },
-                        displayName: 'mixed-audio',
-                        streamType: 'audio',
-                        streamNumber,
-                        filename: path.basename(outputPath),
-                        startedAt: new Date(),
-                    },
-                })
-                .catch((error: unknown) => this.logger.error(`Failed to persist audio-mix recording metadata for room ${state.roomName}: ${error}`));
-
-            state.audioMix = { inputs, outputPath, ffmpeg, dbId };
-        } catch (error) {
-            for (const input of inputs) {
-                input.consumer.close();
-                input.transport.close();
-                this.releasePort(input.destPort);
-                void fs.unlink(input.sdpPath).catch(() => undefined);
-            }
-            throw error;
         }
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
     private async restartAudioMix(
