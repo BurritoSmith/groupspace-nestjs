@@ -49,7 +49,10 @@ export class RecordingService {
     // inherits its environment from the VS Code process rather than re-reading it live) don't pick
     // up a PATH change until a full process restart. FFMPEG_PATH lets local dev point directly at
     // the binary without fighting that.
-    private readonly ffmpegPath = process.env.FFMPEG_PATH ?? 'ffmpeg';
+    // '||' not '??' — FFMPEG_PATH= (blank, the documented production convention) sets the
+    // env var to an empty string, not undefined, so '??' would pass '' straight through to
+    // spawn() and fail with "The argument 'file' cannot be empty."
+    private readonly ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
 
     constructor(private readonly prisma: PrismaService) {}
 
