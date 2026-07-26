@@ -43,6 +43,16 @@ const LISTEN_IP = process.env.MEDIASOUP_LISTEN_IP ?? '127.0.0.1';
 const ANNOUNCED_IP = process.env.MEDIASOUP_ANNOUNCED_IP;
 const MIN_PORT = process.env.MEDIASOUP_MIN_PORT ? Number(process.env.MEDIASOUP_MIN_PORT) : undefined;
 const MAX_PORT = process.env.MEDIASOUP_MAX_PORT ? Number(process.env.MEDIASOUP_MAX_PORT) : undefined;
+// The Worker's own default port range — used for ANY transport that doesn't specify its own
+// explicit port/portRange, which includes RecordingService's PlainTransports (they only pass
+// an ip, not a port). Without bounding this, mediasoup falls back to its library-wide default
+// (a very wide range) that overlaps RECORDING_PORT_MIN/MAX (45000-45199, reserved exclusively
+// for the ffmpeg-facing destination port) — causing ffmpeg's bind() to occasionally lose a race
+// against a mediasoup-auto-assigned port and fail with "Address already in use". Reusing the
+// same bounds as the WebRTC transports is safe: mediasoup tracks port usage across all of a
+// Worker's own transports regardless of type, so they never double-bind within this shared range.
+const WORKER_MIN_PORT = MIN_PORT ?? 10000;
+const WORKER_MAX_PORT = MAX_PORT ?? 10199;
 
 const TRANSPORT_LISTEN_INFOS: mediasoupTypes.TransportListenInfo[] = (['udp', 'tcp'] as const).map((protocol) => ({
     protocol,
@@ -67,6 +77,8 @@ export class RoomService implements OnModuleInit {
     async onModuleInit(): Promise<void> {
         this.worker = await mediasoup.createWorker({
             logLevel: 'warn',
+            rtcMinPort: WORKER_MIN_PORT,
+            rtcMaxPort: WORKER_MAX_PORT,
         });
         this.worker.on('died', () => {
             this.logger.error(`mediasoup worker died (pid ${this.worker.pid}) — exiting process`);
