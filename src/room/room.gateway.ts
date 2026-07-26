@@ -150,8 +150,16 @@ export class RoomGateway implements OnGatewayDisconnect {
 
     @SubscribeMessage('resume-consumer')
     async onResumeConsumer(@ConnectedSocket() socket: Socket, @MessageBody() payload: IResumeConsumerPayload) {
-        await this.roomService.resumeConsumer(socket.id, payload.consumerId);
-        return { ok: true };
+        // Returns { ok: false, error } rather than throwing — see onStartRecording's comment
+        // below. This one bit real: an uncaught throw here left the client's
+        // consumeRemoteProducer() awaiting a promise that would never resolve, so the
+        // stream's tile/track setup code after it never ran at all.
+        try {
+            await this.roomService.resumeConsumer(socket.id, payload.consumerId);
+            return { ok: true };
+        } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : 'Failed to resume consumer.' };
+        }
     }
 
     @SubscribeMessage('start-recording')

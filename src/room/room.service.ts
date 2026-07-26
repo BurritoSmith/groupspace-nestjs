@@ -272,14 +272,24 @@ export class RoomService implements OnModuleInit {
         }
         await consumer.resume();
         if (consumer.kind === 'video') {
-            // Without this, a freshly-resumed video consumer's decoder just waits for
-            // whatever keyframe the producer happens to send next on its own schedule —
-            // which could be several seconds away, or occasionally lost in transit with no
-            // retry. Until one arrives there's nothing decodable, so the tile is fully
-            // connected (audio/data flowing) but renders black. Explicitly requesting one
-            // here means every new consumer gets a decodable frame immediately instead of
-            // depending on being lucky enough to join mid-keyframe-interval.
-            await consumer.requestKeyFrame();
+            try {
+                // Without this, a freshly-resumed video consumer's decoder just waits for
+                // whatever keyframe the producer happens to send next on its own schedule —
+                // which could be several seconds away, or occasionally lost in transit with
+                // no retry. Until one arrives there's nothing decodable, so the tile is fully
+                // connected (audio/data flowing) but renders black. Explicitly requesting one
+                // here means every new consumer gets a decodable frame immediately instead of
+                // depending on being lucky enough to join mid-keyframe-interval.
+                await consumer.requestKeyFrame();
+            } catch (error) {
+                // Best-effort only — this is a nice-to-have optimization, not something the
+                // resume itself should ever fail over. A rejection here (transport already
+                // closing, a worker-channel hiccup, etc.) must not propagate: this method's
+                // caller is a gateway ack handler, and an uncaught throw there leaves the
+                // client's emitWithAck() promise hung forever instead of just missing the
+                // early keyframe.
+                this.logger.warn(`requestKeyFrame failed for consumer ${consumerId} (peer ${peerId}): ${error}`);
+            }
         }
     }
 
