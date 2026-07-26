@@ -74,6 +74,8 @@ model Recording {
   // already treats these as plain string literals, an enum would add migration overhead for no benefit here.
   streamNumber Int
   filename     String
+  gcsPath      String? // <roomName>/<sessionName>/<filename> in RECORDINGS_GCS_BUCKET, when configured
+  // (production/GCP only — local dev keeps writing to disk and leaves this null).
   startedAt    DateTime         @default(now())
   stoppedAt    DateTime? // null until finalizeVideoSession/finalizeAudioMix runs
 

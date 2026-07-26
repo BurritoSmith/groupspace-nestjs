@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Storage } from '@google-cloud/storage';
 import { ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -54,6 +55,12 @@ export class RecordingService {
     // spawn() and fail with "The argument 'file' cannot be empty."
     private readonly ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
 
+    // Unset in local dev — recordings just stay on disk under recordingsDir, same as always.
+    // Set on the deployed VM: finalized recordings are uploaded to this bucket at
+    // <roomName>/<sessionName>/<filename> and the local copy is deleted (not mirrored).
+    private readonly gcsBucketName = process.env.RECORDINGS_GCS_BUCKET || undefined;
+    private readonly storage = this.gcsBucketName ? new Storage() : null;
+
     constructor(private readonly prisma: PrismaService) {}
 
     isRecording(roomName: string): boolean {
@@ -86,19 +93,41 @@ export class RecordingService {
         if (!session) {
             return null;
         }
+        const recordings = await Promise.all(
+            session.recordings.map(async (recording) => ({
+                id: recording.id,
+                filename: recording.filename,
+                streamType: recording.streamType,
+                displayName: recording.displayName,
+                url: await this.getSignedUrl(recording.gcsPath),
+            })),
+        );
         return {
             id: session.id,
             name: session.name,
             roomName: session.roomName,
             startedAt: session.startedAt.toISOString(),
             stoppedAt: session.stoppedAt?.toISOString() ?? null,
-            recordings: session.recordings.map((recording) => ({
-                id: recording.id,
-                filename: recording.filename,
-                streamType: recording.streamType,
-                displayName: recording.displayName,
-            })),
+            recordings,
         };
+    }
+
+    /** Fresh signed URL for a GCS object — never persisted, since signed URLs expire.
+     *  Returns null when GCS isn't configured (local dev) or the recording has no gcsPath. */
+    private async getSignedUrl(gcsPath: string | null): Promise<string | null> {
+        if (!gcsPath || !this.storage || !this.gcsBucketName) {
+            return null;
+        }
+        try {
+            const [url] = await this.storage
+                .bucket(this.gcsBucketName)
+                .file(gcsPath)
+                .getSignedUrl({ action: 'read', expires: Date.now() + 60 * 60 * 1000 });
+            return url;
+        } catch (error) {
+            this.logger.error(`Failed to sign URL for gs://${this.gcsBucketName}/${gcsPath}: ${error}`);
+            return null;
+        }
     }
 
     /** Starts recording every currently active producer in the room. Throws if already recording. */
@@ -110,6 +139,7 @@ export class RecordingService {
         await fs.mkdir(this.sdpScratchDir, { recursive: true });
 
         const sessionDbId = randomUUID();
+        const defaultSessionName = this.buildDefaultSessionName(roomName, new Date());
         await this.prisma.recordingSession.create({
             data: {
                 id: sessionDbId,
@@ -117,13 +147,14 @@ export class RecordingService {
                 // Failsafe default — overwritten if RoomGateway.onStopRecording gets a
                 // user-supplied name from the stop dialog; left as-is for any stop path
                 // that never goes through that dialog (room-empties auto-stop, a crash, etc.).
-                name: this.buildDefaultSessionName(roomName, new Date()),
+                name: defaultSessionName,
             },
         });
 
         const state: IRoomRecordingState = {
             roomName,
             sessionDbId,
+            sessionName: defaultSessionName,
             videoSessions: new Map(),
             audioMix: null,
             audioMixLock: Promise.resolve(),
@@ -154,9 +185,18 @@ export class RecordingService {
             return;
         }
         this.rooms.delete(roomName);
+        if (name) {
+            // Must happen BEFORE teardownRoom(): finalize hooks (which run during teardown)
+            // read state.sessionName to build each upload's <roomName>/<sessionName>/ path —
+            // renaming after the fact would leave already-uploaded files under the old name.
+            state.sessionName = name;
+            await this.prisma.recordingSession
+                .update({ where: { id: state.sessionDbId }, data: { name } })
+                .catch((error: unknown) => this.logger.error(`Failed to rename recording session ${state.sessionDbId}: ${error}`));
+        }
         await this.teardownRoom(state);
         await this.prisma.recordingSession
-            .update({ where: { id: state.sessionDbId }, data: { stoppedAt: new Date(), ...(name ? { name } : {}) } })
+            .update({ where: { id: state.sessionDbId }, data: { stoppedAt: new Date() } })
             .catch((error: unknown) => this.logger.error(`Failed to finalize recording session ${state.sessionDbId}: ${error}`));
         this.events.emit('recording-state', { roomName, isRecording: false });
     }
@@ -180,7 +220,7 @@ export class RecordingService {
             return;
         }
         state.videoSessions.delete(producerId);
-        void this.finalizeVideoSession(session).catch((error: unknown) =>
+        void this.finalizeVideoSession(state, session).catch((error: unknown) =>
             this.logger.error(`Error finalizing recording for producer ${producerId}: ${error}`),
         );
     }
@@ -322,15 +362,16 @@ export class RecordingService {
         }
     }
 
-    private async finalizeVideoSession(session: IRecordingVideoSession): Promise<void> {
+    private async finalizeVideoSession(state: IRoomRecordingState, session: IRecordingVideoSession): Promise<void> {
         await this.stopFfmpegGracefully(session.ffmpeg);
         session.consumer.close();
         session.transport.close();
         this.releasePort(session.destPort);
         void fs.unlink(session.sdpPath).catch(() => undefined);
         await this.remuxToFinalFile(this.tempRecordingPath(session.outputPath), session.outputPath);
+        const gcsPath = await this.uploadToGcsIfConfigured(session.outputPath, state.roomName, state.sessionName);
         await this.prisma.recording
-            .update({ where: { id: session.dbId }, data: { stoppedAt: new Date() } })
+            .update({ where: { id: session.dbId }, data: { stoppedAt: new Date(), ...(gcsPath ? { gcsPath } : {}) } })
             .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for recording ${session.dbId}: ${error}`));
     }
 
@@ -432,12 +473,12 @@ export class RecordingService {
         const old = state.audioMix;
         state.audioMix = null;
         if (old) {
-            await this.finalizeAudioMix(old);
+            await this.finalizeAudioMix(state, old);
         }
         await this.startAudioMix(state, router, mics);
     }
 
-    private async finalizeAudioMix(mix: IRecordingAudioMixSession): Promise<void> {
+    private async finalizeAudioMix(state: IRoomRecordingState, mix: IRecordingAudioMixSession): Promise<void> {
         await this.stopFfmpegGracefully(mix.ffmpeg);
         for (const input of mix.inputs) {
             input.consumer.close();
@@ -446,15 +487,16 @@ export class RecordingService {
             void fs.unlink(input.sdpPath).catch(() => undefined);
         }
         await this.remuxToFinalFile(this.tempRecordingPath(mix.outputPath), mix.outputPath);
+        const gcsPath = await this.uploadToGcsIfConfigured(mix.outputPath, state.roomName, state.sessionName);
         await this.prisma.recording
-            .update({ where: { id: mix.dbId }, data: { stoppedAt: new Date() } })
+            .update({ where: { id: mix.dbId }, data: { stoppedAt: new Date(), ...(gcsPath ? { gcsPath } : {}) } })
             .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for audio-mix recording ${mix.dbId}: ${error}`));
     }
 
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
         await Promise.all([
-            ...[...state.videoSessions.values()].map((session) => this.finalizeVideoSession(session)),
-            this.withAudioMixLock(state, () => (state.audioMix ? this.finalizeAudioMix(state.audioMix) : Promise.resolve())),
+            ...[...state.videoSessions.values()].map((session) => this.finalizeVideoSession(state, session)),
+            this.withAudioMixLock(state, () => (state.audioMix ? this.finalizeAudioMix(state, state.audioMix) : Promise.resolve())),
         ]);
     }
 
@@ -534,6 +576,28 @@ export class RecordingService {
             this.logger.error(
                 `Failed to remux ${tempPath} -> ${finalPath} (temp file kept): ${error instanceof Error ? error.message : error}`,
             );
+        }
+    }
+
+    /** Uploads a finalized local recording to Cloud Storage at <roomName>/<sessionName>/<filename>,
+     *  deleting the local copy on success — RECORDINGS_GCS_BUCKET moves storage off the VM's disk
+     *  entirely, it isn't a backup/mirror. Returns the object path, or null if GCS isn't configured
+     *  (local dev) or the upload failed (local file is kept in that case, matching this file's
+     *  established "never lose a recording over a best-effort step" philosophy). */
+    private async uploadToGcsIfConfigured(localPath: string, roomName: string, sessionName: string): Promise<string | null> {
+        if (!this.storage || !this.gcsBucketName) {
+            return null;
+        }
+        const objectPath = `${this.sanitize(roomName)}/${this.sanitize(sessionName)}/${path.basename(localPath)}`;
+        try {
+            await this.storage.bucket(this.gcsBucketName).upload(localPath, { destination: objectPath });
+            void fs.unlink(localPath).catch(() => undefined);
+            return objectPath;
+        } catch (error) {
+            this.logger.error(
+                `Failed to upload ${localPath} to gs://${this.gcsBucketName}/${objectPath} (local file kept): ${error}`,
+            );
+            return null;
         }
     }
 

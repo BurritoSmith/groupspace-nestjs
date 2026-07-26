@@ -58,6 +58,10 @@ export interface IRecordingSummary {
     filename: string;
     streamType: string;
     displayName: string;
+    /** Signed, time-limited URL to the file in Cloud Storage — generated fresh on every
+     *  read (never persisted, since signed URLs expire), null when RECORDINGS_GCS_BUCKET
+     *  isn't configured (local dev) or the object has no gcsPath for some other reason. */
+    url: string | null;
 }
 
 export interface IRecordingSessionDetail extends IRecordingSessionSummary {
@@ -70,6 +74,10 @@ export interface IRoomRecordingState {
     // The RecordingSession DB row grouping every stream in this start()/stop() lifecycle
     // together, for the future playback component to look up "all streams for session X".
     sessionDbId: string;
+    // Mutable — starts as the failsafe default, updated in stop() BEFORE teardownRoom()
+    // runs, so per-stream GCS uploads (which happen during finalize, i.e. during teardown)
+    // use the final, possibly user-renamed value for their <roomName>/<sessionName>/ path.
+    sessionName: string;
     videoSessions: Map<string, IRecordingVideoSession>; // keyed by producerId
     audioMix: IRecordingAudioMixSession | null;
     // Serializes every audio-mix start/restart/finalize for this room onto one
