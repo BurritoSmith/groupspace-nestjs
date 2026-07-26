@@ -271,6 +271,16 @@ export class RoomService implements OnModuleInit {
             throw new Error(`No consumer ${consumerId} for peer ${peerId}`);
         }
         await consumer.resume();
+        if (consumer.kind === 'video') {
+            // Without this, a freshly-resumed video consumer's decoder just waits for
+            // whatever keyframe the producer happens to send next on its own schedule —
+            // which could be several seconds away, or occasionally lost in transit with no
+            // retry. Until one arrives there's nothing decodable, so the tile is fully
+            // connected (audio/data flowing) but renders black. Explicitly requesting one
+            // here means every new consumer gets a decodable frame immediately instead of
+            // depending on being lucky enough to join mid-keyframe-interval.
+            await consumer.requestKeyFrame();
+        }
     }
 
     /** Closes one producer the peer voluntarily stopped (not a disconnect); returns info the gateway needs to notify the room. */
