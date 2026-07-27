@@ -112,6 +112,10 @@ export class RecordingService {
                     displayName: recording.displayName,
                     url,
                     thumbnailUrl,
+                    // Lets the frontend align streams on one shared timeline even when they
+                    // started at genuinely different real-world moments (e.g. a screen share
+                    // that began well after the session's webcam stream) — see PlaybackSync.
+                    startedAt: recording.startedAt.toISOString(),
                 };
             }),
         );

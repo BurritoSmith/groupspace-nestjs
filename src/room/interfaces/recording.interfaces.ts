@@ -67,6 +67,11 @@ export interface IRecordingSummary {
      *  first extraction attempt has run. Always served from local disk — see RecordingService's
      *  local-only-thumbnails design choice. */
     thumbnailUrl: string | null;
+    /** When this specific stream started — recordings in the same session can start at genuinely
+     *  different real-world moments (a screen share begun well after the webcam, say), so the
+     *  frontend uses this to align every stream on one shared timeline rather than assuming they
+     *  all started together. */
+    startedAt: string;
 }
 
 export interface IRecordingSessionDetail extends IRecordingSessionSummary {
