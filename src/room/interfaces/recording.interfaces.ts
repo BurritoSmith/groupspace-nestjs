@@ -58,10 +58,29 @@ export interface IRecordingSummary {
     filename: string;
     streamType: string;
     displayName: string;
-    /** A signed, time-limited Cloud Storage URL when RECORDINGS_GCS_BUCKET is configured
-     *  (production), or a link to the file served straight off local disk otherwise (local
-     *  dev). Only null if the recording has no gcsPath and GCS isn't configured either. */
+    /** Local VM URL until the GCS upload is confirmed complete (gcsUploadedAt), then the signed
+     *  Cloud Storage URL — see RecordingService.buildPlaybackUrls. Null until the recording stops
+     *  (the file doesn't exist yet) or if GCS isn't configured and the local file is unreachable. */
     url: string | null;
+    /** Grayscale while thumbnailStatus is 'live' (mid-recording snapshot), full color once 'final'
+     *  (extracted from the finished, remuxed file). Null for audio-only recordings and before the
+     *  first extraction attempt has run. Always served from local disk — see RecordingService's
+     *  local-only-thumbnails design choice. */
+    thumbnailUrl: string | null;
+    /** When this specific stream started — recordings in the same session can start at genuinely
+     *  different real-world moments (a screen share begun well after the webcam, say), so the
+     *  frontend uses this to align every stream on one shared timeline rather than assuming they
+     *  all started together. */
+    startedAt: string;
+    /** When this specific stream stopped, or null while still recording — paired with startedAt
+     *  so the frontend can compute each recording's actual duration from our own bookkeeping
+     *  instead of trusting the browser's <video>.duration. */
+    stoppedAt: string | null;
+    /** False when the stream stopped but never actually captured any data (the producer never
+     *  emitted a keyframe, or was stopped before any frame arrived) — stoppedAt is still set in
+     *  that case, but url stays null forever and the frontend must exclude this recording from
+     *  the shared playback timeline entirely, not just leave it with an unplayable link. */
+    hasContent: boolean;
 }
 
 export interface IRecordingSessionDetail extends IRecordingSessionSummary {

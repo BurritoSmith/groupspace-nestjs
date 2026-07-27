@@ -57,6 +57,76 @@ export class RoomGateway implements OnGatewayDisconnect {
         this.recordingService.events.on('recording-state', ({ roomName, isRecording }: { roomName: string; isRecording: boolean }) => {
             this.server.to(roomName).emit('recording-state', { isRecording });
         });
+        // Fan-out for the playback page's progressive-availability UI — a bare broadcast room per
+        // recording session, joined via subscribe-recording-session below. Unlike the video-call
+        // room, there's no application-level state tied to membership here, so no disconnect
+        // cleanup is needed on this side (see subscribe/unsubscribe handlers' comment).
+        this.recordingService.events.on(
+            'recording-ready',
+            ({
+                sessionId,
+                recordingId,
+                url,
+                stoppedAt,
+                hasContent,
+            }: {
+                sessionId: string;
+                recordingId: string;
+                url: string | null;
+                stoppedAt: string;
+                hasContent: boolean;
+            }) => {
+                this.server.to(`recording-session:${sessionId}`).emit('recording-ready', { recordingId, url, stoppedAt, hasContent });
+            },
+        );
+        this.recordingService.events.on(
+            'thumbnail-updated',
+            ({
+                sessionId,
+                recordingId,
+                thumbnailUrl,
+                thumbnailStatus,
+            }: {
+                sessionId: string;
+                recordingId: string;
+                thumbnailUrl: string | null;
+                thumbnailStatus: string;
+            }) => {
+                this.server.to(`recording-session:${sessionId}`).emit('thumbnail-updated', { recordingId, thumbnailUrl, thumbnailStatus });
+            },
+        );
+        this.recordingService.events.on(
+            'recording-uploaded',
+            ({ sessionId, recordingId, url }: { sessionId: string; recordingId: string; url: string | null }) => {
+                this.server.to(`recording-session:${sessionId}`).emit('recording-uploaded', { recordingId, url });
+            },
+        );
+        // A brand-new stream (webcam/screen start, or a mic-set change creating a fresh
+        // mixed-audio row) starting while someone is already viewing this session's playback
+        // page — lets that viewer's tile grid grow live instead of only ever reflecting
+        // whatever existed at page load.
+        this.recordingService.events.on(
+            'recording-added',
+            ({
+                sessionId,
+                recordingId,
+                filename,
+                streamType,
+                displayName,
+                startedAt,
+            }: {
+                sessionId: string;
+                recordingId: string;
+                filename: string;
+                streamType: string;
+                displayName: string;
+                startedAt: string;
+            }) => {
+                this.server
+                    .to(`recording-session:${sessionId}`)
+                    .emit('recording-added', { recordingId, filename, streamType, displayName, startedAt });
+            },
+        );
     }
 
     handleDisconnect(socket: Socket): void {
@@ -218,6 +288,23 @@ export class RoomGateway implements OnGatewayDisconnect {
             this.logger.error(`Failed to load recording session ${payload.id}: ${error}`);
             return { session: null };
         }
+    }
+
+    /** No room-membership check — same rationale as get-recording-session above (the playback
+     *  route can be visited directly). Unlike join-room/leave-room, there's no server-side
+     *  bookkeeping beyond Socket.IO's own room membership here — it's a bare broadcast-fan-out
+     *  channel, so a disconnect needs no explicit cleanup; Socket.IO already removes a
+     *  disconnected socket from every room it was in. */
+    @SubscribeMessage('subscribe-recording-session')
+    onSubscribeRecordingSession(@ConnectedSocket() socket: Socket, @MessageBody() payload: { id: string }): { ok: true } {
+        void socket.join(`recording-session:${payload.id}`);
+        return { ok: true };
+    }
+
+    @SubscribeMessage('unsubscribe-recording-session')
+    onUnsubscribeRecordingSession(@ConnectedSocket() socket: Socket, @MessageBody() payload: { id: string }): { ok: true } {
+        void socket.leave(`recording-session:${payload.id}`);
+        return { ok: true };
     }
 
     @SubscribeMessage('chat-message')

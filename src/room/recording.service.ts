@@ -19,6 +19,16 @@ import {
     IRoomRecordingState,
 } from './interfaces/recording.interfaces';
 
+interface IPlaybackUrlSourceRow {
+    filename: string;
+    gcsPath: string | null;
+    gcsUploadedAt: Date | null;
+    stoppedAt: Date | null;
+    hasContent: boolean;
+    thumbnailStatus: string | null;
+    thumbnailUpdatedAt: Date | null;
+}
+
 /**
  * Records every active stream in a room by forwarding each producer's RTP to
  * a local ffmpeg process via a mediasoup PlainTransport (loopback-only —
@@ -94,15 +104,27 @@ export class RecordingService {
             return null;
         }
         const recordings = await Promise.all(
-            session.recordings.map(async (recording) => ({
-                id: recording.id,
-                filename: recording.filename,
-                streamType: recording.streamType,
-                displayName: recording.displayName,
-                // GCS-configured deployments (production) link to the signed cloud URL; local
-                // dev has no bucket, so link to the file main.ts serves straight off disk.
-                url: this.gcsBucketName ? await this.getSignedUrl(recording.gcsPath) : this.buildLocalFileUrl(recording.filename),
-            })),
+            session.recordings.map(async (recording) => {
+                const { url, thumbnailUrl } = await this.buildPlaybackUrls(recording);
+                return {
+                    id: recording.id,
+                    filename: recording.filename,
+                    streamType: recording.streamType,
+                    displayName: recording.displayName,
+                    url,
+                    thumbnailUrl,
+                    // Lets the frontend align streams on one shared timeline even when they
+                    // started at genuinely different real-world moments (e.g. a screen share
+                    // that began well after the session's webcam stream) — see PlaybackSync.
+                    // stoppedAt lets it compute each recording's actual duration directly from
+                    // our own bookkeeping, rather than trusting the browser's <video>.duration
+                    // (which can be Infinity/wrong immediately after loadedmetadata and only
+                    // self-correct later via a separate durationchange event).
+                    startedAt: recording.startedAt.toISOString(),
+                    stoppedAt: recording.stoppedAt?.toISOString() ?? null,
+                    hasContent: recording.hasContent,
+                };
+            }),
         );
         return {
             id: session.id,
@@ -132,12 +154,50 @@ export class RecordingService {
         }
     }
 
-    /** Points at the static route main.ts mounts over recordingsDir — local-dev-only,
-     *  since production always has RECORDINGS_GCS_BUCKET configured and uses getSignedUrl
-     *  instead. localhost is correct here because in local dev the frontend and backend
-     *  always run on the same machine. */
+    /** SSLIP_HOSTNAME is the public HTTPS domain Caddy already TLS-terminates for and reverse-proxies
+     *  straight through to this app (its catch-all `reverse_proxy 127.0.0.1:3001` has no path matcher,
+     *  so /recordings/* is already publicly reachable with zero deploy changes) — set in production,
+     *  unset in local dev where localhost is correct instead. */
+    private publicBaseUrl(): string {
+        return process.env.SSLIP_HOSTNAME ? `https://${process.env.SSLIP_HOSTNAME}` : `http://localhost:${process.env.PORT ?? 3001}`;
+    }
+
+    /** Points at the static route main.ts mounts over recordingsDir. Used as the immediately-available
+     *  link the instant a recording finishes locally, before (or instead of, if it never lands) the
+     *  separate GCS upload step completes — see buildPlaybackUrls. */
     private buildLocalFileUrl(filename: string): string {
-        return `http://localhost:${process.env.PORT ?? 3001}/recordings/${encodeURIComponent(filename)}`;
+        return `${this.publicBaseUrl()}/recordings/${encodeURIComponent(filename)}`;
+    }
+
+    /** Same derive-by-string-replace convention as tempRecordingPath — no DB column needed for the path itself. */
+    private thumbnailPath(finalPath: string): string {
+        return finalPath.replace(/\.mp4$/, '.thumb.jpg');
+    }
+
+    /** thumbnailUpdatedAt doubles as a cache-busting query param — the derived thumbnail filename is
+     *  identical across the grayscale ('live') -> color ('final') regeneration, so without this the
+     *  browser would keep serving whichever version it first cached at that URL. */
+    private buildLocalThumbnailUrl(filename: string, updatedAt: Date | null): string | null {
+        if (!updatedAt) {
+            return null;
+        }
+        const thumbFilename = this.thumbnailPath(filename);
+        return `${this.publicBaseUrl()}/recordings/${encodeURIComponent(thumbFilename)}?v=${updatedAt.getTime()}`;
+    }
+
+    /** Single source of truth for "what URL should this recording show right now" — reused by the
+     *  initial getSessionDetail fetch and every real-time event payload, so both are always computed
+     *  identically. Serves the local VM file until gcsUploadedAt confirms the upload actually landed
+     *  (not merely that gcsPath, the deterministic intended path, has been assigned). */
+    private async buildPlaybackUrls(r: IPlaybackUrlSourceRow): Promise<{ url: string | null; thumbnailUrl: string | null }> {
+        const url =
+            !r.stoppedAt || !r.hasContent
+                ? null // final file doesn't exist yet, or never will (the recording captured nothing)
+                : r.gcsUploadedAt && this.gcsBucketName
+                  ? await this.getSignedUrl(r.gcsPath)
+                  : this.buildLocalFileUrl(r.filename);
+        const thumbnailUrl = r.thumbnailStatus ? this.buildLocalThumbnailUrl(r.filename, r.thumbnailUpdatedAt) : null;
+        return { url, thumbnailUrl };
     }
 
     /** Starts recording every currently active producer in the room. Throws if already recording. */
@@ -359,7 +419,8 @@ export class RecordingService {
                 await consumer.requestKeyFrame();
 
                 const dbId = randomUUID();
-                await this.prisma.recording
+                const startedAt = new Date();
+                const created = await this.prisma.recording
                     .create({
                         data: {
                             id: dbId,
@@ -370,12 +431,27 @@ export class RecordingService {
                             streamType: info.source,
                             streamNumber,
                             filename: path.basename(outputPath),
-                            startedAt: new Date(),
+                            startedAt,
                         },
                     })
-                    .catch((error: unknown) =>
-                        this.logger.error(`Failed to persist recording metadata for producer ${info.producerId}: ${error}`),
-                    );
+                    .catch((error: unknown) => {
+                        this.logger.error(`Failed to persist recording metadata for producer ${info.producerId}: ${error}`);
+                        return null;
+                    });
+                // Lets a viewer already on this session's (still-recording) playback page see this
+                // stream appear live, instead of only ever reflecting whatever existed when their
+                // page first loaded — only emitted once the row genuinely exists, matching the
+                // hasContent lesson: never tell playback clients about something that isn't there.
+                if (created) {
+                    this.events.emit('recording-added', {
+                        sessionId: state.sessionDbId,
+                        recordingId: dbId,
+                        filename: path.basename(outputPath),
+                        streamType: info.source,
+                        displayName: info.displayName,
+                        startedAt: startedAt.toISOString(),
+                    });
+                }
 
                 state.videoSessions.set(info.producerId, {
                     producerId: info.producerId,
@@ -390,6 +466,22 @@ export class RecordingService {
                     ffmpeg,
                     dbId,
                 });
+
+                // Grace period comfortably after the first forced-keyframe fragment flush (2s
+                // interval, see the -force_key_frames comment above) so there's actually something
+                // in the temp file to extract a frame from. Re-reads the live map by dbId at fire
+                // time rather than tracking a cancelable timer handle — a session that's since
+                // stopped or been replaced simply won't match, and generateFinalThumbnail covers it.
+                const GRACE_MS = 3000;
+                setTimeout(() => {
+                    const current = state.videoSessions.get(info.producerId);
+                    if (!current || current.dbId !== dbId) {
+                        return;
+                    }
+                    void this.generateLiveThumbnail(state, current).catch((error: unknown) =>
+                        this.logger.warn(`Live thumbnail generation failed for producer ${info.producerId}: ${error}`),
+                    );
+                }, GRACE_MS);
                 return;
             } catch (error) {
                 lastError = error;
@@ -406,17 +498,41 @@ export class RecordingService {
         throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
+    /** Splits into two phases on purpose: the recording becomes locally available and its
+     *  `stoppedAt` lands the moment remux finishes, WITHOUT waiting on the GCS upload (which can
+     *  lag well behind) — the fire-and-forget thumbnail/upload steps below run after this method
+     *  itself is done, notifying playback clients over RecordingService.events as each completes. */
     private async finalizeVideoSession(state: IRoomRecordingState, session: IRecordingVideoSession): Promise<void> {
         await this.stopFfmpegGracefully(session.ffmpeg);
         session.consumer.close();
         session.transport.close();
         this.releasePort(session.destPort);
         void fs.unlink(session.sdpPath).catch(() => undefined);
-        await this.remuxToFinalFile(this.tempRecordingPath(session.outputPath), session.outputPath);
-        const gcsPath = await this.uploadToGcsIfConfigured(session.outputPath, state.roomName, state.sessionName);
+
+        const hasContent = await this.remuxToFinalFile(this.tempRecordingPath(session.outputPath), session.outputPath);
+
+        // Locally available now — independent of GCS, which is why this write can't wait on it.
+        const stoppedAt = new Date();
         await this.prisma.recording
-            .update({ where: { id: session.dbId }, data: { stoppedAt: new Date(), ...(gcsPath ? { gcsPath } : {}) } })
+            .update({ where: { id: session.dbId }, data: { stoppedAt, hasContent } })
             .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for recording ${session.dbId}: ${error}`));
+        this.events.emit('recording-ready', {
+            sessionId: state.sessionDbId,
+            recordingId: session.dbId,
+            url: hasContent ? this.buildLocalFileUrl(path.basename(session.outputPath)) : null,
+            stoppedAt: stoppedAt.toISOString(),
+            hasContent,
+        });
+
+        // Nothing to thumbnail or upload for a recording that captured no data.
+        if (hasContent) {
+            void this.generateFinalThumbnail(state, session).catch((error: unknown) =>
+                this.logger.warn(`Final thumbnail generation failed for recording ${session.dbId}: ${error}`),
+            );
+            void this.uploadAndNotify(state, session.outputPath, session.dbId).catch((error: unknown) =>
+                this.logger.error(`Post-finalize GCS upload failed for recording ${session.dbId}: ${error}`),
+            );
+        }
     }
 
     private async startAudioMix(
@@ -491,7 +607,8 @@ export class RecordingService {
                 }
 
                 const dbId = randomUUID();
-                await this.prisma.recording
+                const startedAt = new Date();
+                const created = await this.prisma.recording
                     .create({
                         data: {
                             id: dbId,
@@ -501,10 +618,26 @@ export class RecordingService {
                             streamType: 'audio',
                             streamNumber,
                             filename: path.basename(outputPath),
-                            startedAt: new Date(),
+                            startedAt,
                         },
                     })
-                    .catch((error: unknown) => this.logger.error(`Failed to persist audio-mix recording metadata for room ${state.roomName}: ${error}`));
+                    .catch((error: unknown) => {
+                        this.logger.error(`Failed to persist audio-mix recording metadata for room ${state.roomName}: ${error}`);
+                        return null;
+                    });
+                // Mirrors startVideoSession's notification — a mic-set change mid-session
+                // (restartAudioMix finalizing the old row and calling back into startAudioMix)
+                // also needs to tell a live viewer a new row now exists.
+                if (created) {
+                    this.events.emit('recording-added', {
+                        sessionId: state.sessionDbId,
+                        recordingId: dbId,
+                        filename: path.basename(outputPath),
+                        streamType: 'audio',
+                        displayName: 'mixed-audio',
+                        startedAt: startedAt.toISOString(),
+                    });
+                }
 
                 state.audioMix = { inputs, outputPath, ffmpeg, dbId };
                 return;
@@ -545,11 +678,27 @@ export class RecordingService {
             this.releasePort(input.destPort);
             void fs.unlink(input.sdpPath).catch(() => undefined);
         }
-        await this.remuxToFinalFile(this.tempRecordingPath(mix.outputPath), mix.outputPath);
-        const gcsPath = await this.uploadToGcsIfConfigured(mix.outputPath, state.roomName, state.sessionName);
+        const hasContent = await this.remuxToFinalFile(this.tempRecordingPath(mix.outputPath), mix.outputPath);
+
+        // Same decoupling as finalizeVideoSession — locally available now, GCS upload is separate.
+        // No thumbnail for audio: streamType 'audio' has no thumbnail concept.
+        const stoppedAt = new Date();
         await this.prisma.recording
-            .update({ where: { id: mix.dbId }, data: { stoppedAt: new Date(), ...(gcsPath ? { gcsPath } : {}) } })
+            .update({ where: { id: mix.dbId }, data: { stoppedAt, hasContent } })
             .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for audio-mix recording ${mix.dbId}: ${error}`));
+        this.events.emit('recording-ready', {
+            sessionId: state.sessionDbId,
+            recordingId: mix.dbId,
+            url: hasContent ? this.buildLocalFileUrl(path.basename(mix.outputPath)) : null,
+            stoppedAt: stoppedAt.toISOString(),
+            hasContent,
+        });
+
+        if (hasContent) {
+            void this.uploadAndNotify(state, mix.outputPath, mix.dbId).catch((error: unknown) =>
+                this.logger.error(`Post-finalize GCS upload failed for audio-mix recording ${mix.dbId}: ${error}`),
+            );
+        }
     }
 
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
@@ -618,49 +767,120 @@ export class RecordingService {
      * temp file's actual total duration even though it has no central index.
      * Best-effort: logs and keeps the temp file (rather than throwing) if the
      * remux itself fails, so a stop/close action never fails because of this.
+     *
+     * Returns whether a real, playable final file actually exists now — callers use this to set
+     * Recording.hasContent. A producer that never emitted a keyframe (a separate, already-diagnosed
+     * browser/encoder issue) or a stream stopped before any frame arrived leaves the temp file
+     * missing/empty; without this signal, a zero-content recording still got a plausible-looking
+     * stoppedAt and a URL pointing at a file that doesn't exist, silently poisoning every consumer
+     * of it (the shared playback timeline waits forever for a 'seeked' event that a 404'd <video>
+     * can never fire).
      */
-    private async remuxToFinalFile(tempPath: string, finalPath: string): Promise<void> {
+    private async remuxToFinalFile(tempPath: string, finalPath: string): Promise<boolean> {
         try {
             const stat = await fs.stat(tempPath).catch(() => null);
             if (!stat || stat.size === 0) {
                 this.logger.warn(`Recording temp file ${tempPath} is missing or empty — nothing to remux`);
-                return;
+                return false;
             }
             await this.runFfmpegToCompletion(
                 ['-y', '-i', tempPath, '-c', 'copy', '-movflags', '+faststart', finalPath],
                 `remux ${path.basename(finalPath)}`,
             );
             void fs.unlink(tempPath).catch(() => undefined);
+            return true;
         } catch (error) {
             this.logger.error(
                 `Failed to remux ${tempPath} -> ${finalPath} (temp file kept): ${error instanceof Error ? error.message : error}`,
             );
+            return false;
         }
     }
 
-    /** Uploads a finalized local recording to Cloud Storage at <roomName>/<sessionName>/<filename>,
-     *  deleting the local copy on success — RECORDINGS_GCS_BUCKET moves storage off the VM's disk
-     *  entirely, it isn't a backup/mirror. Returns the deterministic object path whenever GCS is
-     *  configured, even if THIS upload attempt failed (local file is kept in that case, matching
-     *  this file's established "never lose a recording over a best-effort step" philosophy) — a
-     *  signed URL built from that path is a pure cryptographic signature, it doesn't require the
-     *  object to already exist, so the playback page can show a link immediately and it'll simply
-     *  start working once the object lands (this upload succeeding, or a future manual retry).
-     *  Returns null only when GCS isn't configured at all (local dev). */
-    private async uploadToGcsIfConfigured(localPath: string, roomName: string, sessionName: string): Promise<string | null> {
+    /** Best-effort grayscale snapshot pulled from the LIVE temp file while the recording is still
+     *  running, so a thumbnail exists the moment someone browses to the playback page instead of
+     *  only after the recording stops. Reading a still-being-appended fragmented mp4 with a second
+     *  ffmpeg process is a real (if generally safe on Linux) race against the writer — this never
+     *  throws into its caller, it just silently leaves thumbnailStatus null on failure, and
+     *  generateFinalThumbnail always covers it properly once the recording actually stops. */
+    private async generateLiveThumbnail(state: IRoomRecordingState, session: IRecordingVideoSession): Promise<void> {
+        const tempPath = this.tempRecordingPath(session.outputPath);
+        const thumbPath = this.thumbnailPath(session.outputPath);
+        await this.runFfmpegToCompletion(
+            ['-y', '-ss', '1', '-i', tempPath, '-frames:v', '1', '-vf', 'scale=320:-1,hue=s=0', thumbPath],
+            `live-thumbnail ${path.basename(thumbPath)}`,
+        );
+        const updatedAt = new Date();
+        await this.prisma.recording.update({ where: { id: session.dbId }, data: { thumbnailStatus: 'live', thumbnailUpdatedAt: updatedAt } });
+        this.events.emit('thumbnail-updated', {
+            sessionId: state.sessionDbId,
+            recordingId: session.dbId,
+            thumbnailStatus: 'live',
+            thumbnailUrl: this.buildLocalThumbnailUrl(path.basename(session.outputPath), updatedAt),
+        });
+    }
+
+    /** The "real" thumbnail, extracted from the final indexed mp4 once the recording has actually
+     *  stopped and remuxed — replaces the live grayscale one (same derived filename, different
+     *  thumbnailUpdatedAt cache-busts it) with a full-color frame. Best-effort, same as above. */
+    private async generateFinalThumbnail(state: IRoomRecordingState, session: IRecordingVideoSession): Promise<void> {
+        const thumbPath = this.thumbnailPath(session.outputPath);
+        await this.runFfmpegToCompletion(
+            ['-y', '-ss', '1', '-i', session.outputPath, '-frames:v', '1', '-vf', 'scale=320:-1', thumbPath],
+            `final-thumbnail ${path.basename(thumbPath)}`,
+        );
+        const updatedAt = new Date();
+        await this.prisma.recording.update({ where: { id: session.dbId }, data: { thumbnailStatus: 'final', thumbnailUpdatedAt: updatedAt } });
+        this.events.emit('thumbnail-updated', {
+            sessionId: state.sessionDbId,
+            recordingId: session.dbId,
+            thumbnailStatus: 'final',
+            thumbnailUrl: this.buildLocalThumbnailUrl(path.basename(session.outputPath), updatedAt),
+        });
+    }
+
+    private deterministicGcsObjectPath(roomName: string, sessionName: string, localPath: string): string {
+        return `${this.sanitize(roomName)}/${this.sanitize(sessionName)}/${path.basename(localPath)}`;
+    }
+
+    /** Uploads a finalized local recording to Cloud Storage, deleting the local copy on success —
+     *  RECORDINGS_GCS_BUCKET moves storage off the VM's disk entirely, it isn't a backup/mirror.
+     *  Local file is kept if the upload fails, matching this file's established "never lose a
+     *  recording over a best-effort step" philosophy. Returns whether it actually succeeded —
+     *  callers decide what that means for gcsUploadedAt/notifications (see uploadAndNotify). */
+    private async uploadToGcsIfConfigured(localPath: string, objectPath: string): Promise<boolean> {
         if (!this.storage || !this.gcsBucketName) {
-            return null;
+            return false;
         }
-        const objectPath = `${this.sanitize(roomName)}/${this.sanitize(sessionName)}/${path.basename(localPath)}`;
         try {
             await this.storage.bucket(this.gcsBucketName).upload(localPath, { destination: objectPath });
             void fs.unlink(localPath).catch(() => undefined);
+            return true;
         } catch (error) {
-            this.logger.error(
-                `Failed to upload ${localPath} to gs://${this.gcsBucketName}/${objectPath} (local file kept): ${error}`,
-            );
+            this.logger.error(`Failed to upload ${localPath} to gs://${this.gcsBucketName}/${objectPath} (local file kept): ${error}`);
+            return false;
         }
-        return objectPath;
+    }
+
+    /** The fire-and-forget step finalizeVideoSession/finalizeAudioMix kick off after the recording
+     *  is already locally available — persists gcsPath regardless of outcome (matches the existing
+     *  "always show a link" behavior for signing purposes) but only sets gcsUploadedAt, and only
+     *  emits 'recording-uploaded' to swap playback clients over to the signed URL, on confirmed
+     *  success. No-ops entirely when GCS isn't configured (local dev) — gcsPath/gcsUploadedAt stay
+     *  null forever, buildPlaybackUrls keeps serving the local file, which is correct there. */
+    private async uploadAndNotify(state: IRoomRecordingState, outputPath: string, dbId: string): Promise<void> {
+        if (!this.gcsBucketName) {
+            return;
+        }
+        const objectPath = this.deterministicGcsObjectPath(state.roomName, state.sessionName, outputPath);
+        const uploaded = await this.uploadToGcsIfConfigured(outputPath, objectPath);
+        await this.prisma.recording
+            .update({ where: { id: dbId }, data: { gcsPath: objectPath, ...(uploaded ? { gcsUploadedAt: new Date() } : {}) } })
+            .catch((error: unknown) => this.logger.error(`Failed to persist gcsPath for recording ${dbId}: ${error}`));
+        if (uploaded) {
+            const url = await this.getSignedUrl(objectPath);
+            this.events.emit('recording-uploaded', { sessionId: state.sessionDbId, recordingId: dbId, url });
+        }
     }
 
     private tempRecordingPath(finalPath: string): string {
