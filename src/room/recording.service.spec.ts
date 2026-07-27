@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../prisma/prisma.service';
 import { RecordingService } from './recording.service';
+import { IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
 
 describe('RecordingService', () => {
     let service: RecordingService;
@@ -169,6 +170,77 @@ describe('RecordingService', () => {
             expect(args).not.toContain('-c:a');
             expect(args).not.toContain('aac');
             expect(args).toContain('+frag_keyframe+empty_moov+faststart');
+        });
+    });
+
+    describe('pendingFinalizations — race between an individually-stopped stream and stopping the whole recording', () => {
+        // Regression test: "stop all streams" closes several producers individually (each
+        // removed from videoSessions synchronously, with its finalization kicked off
+        // fire-and-forget) immediately before stopping the recording itself. Without
+        // pendingFinalizations, teardownRoom() would see an empty videoSessions map for an
+        // already-closing producer and not wait for it, letting the recording session get
+        // marked stopped while that producer's file was still mid-finalization.
+        function buildState(): IRoomRecordingState {
+            return {
+                roomName: 'room1',
+                sessionDbId: 'session-1',
+                sessionName: 'Test Session',
+                videoSessions: new Map([['producer-1', {} as IRecordingVideoSession]]),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+            };
+        }
+
+        it('notifyProducerClosing() removes the session from videoSessions synchronously but tracks it in pendingFinalizations until it settles', async () => {
+            const state = buildState();
+            let resolveFinalize!: () => void;
+            const finalizeSpy = jest
+                .fn()
+                .mockReturnValue(new Promise<void>((resolve) => (resolveFinalize = resolve)));
+            (service as unknown as { finalizeVideoSession: typeof finalizeSpy }).finalizeVideoSession = finalizeSpy;
+            (service as unknown as { rooms: Map<string, IRoomRecordingState> }).rooms.set('room1', state);
+
+            (service as unknown as { notifyProducerClosing: (roomName: string, producerId: string) => void }).notifyProducerClosing(
+                'room1',
+                'producer-1',
+            );
+
+            expect(state.videoSessions.size).toBe(0); // removed immediately, before finalization even starts
+            expect(state.pendingFinalizations.size).toBe(1); // but tracked as in-flight
+
+            resolveFinalize();
+            await Promise.resolve(); // let the .finally() cleanup microtask run
+            await Promise.resolve();
+            expect(state.pendingFinalizations.size).toBe(0); // cleaned up once settled
+        });
+
+        it("teardownRoom() waits for a finalization already kicked off by notifyProducerClosing, not just what's still in videoSessions", async () => {
+            const state = buildState();
+            let finalized = false;
+            const finalizeSpy = jest.fn().mockImplementation(
+                () =>
+                    new Promise<void>((resolve) =>
+                        setTimeout(() => {
+                            finalized = true;
+                            resolve();
+                        }, 10),
+                    ),
+            );
+            (service as unknown as { finalizeVideoSession: typeof finalizeSpy }).finalizeVideoSession = finalizeSpy;
+            (service as unknown as { rooms: Map<string, IRoomRecordingState> }).rooms.set('room1', state);
+
+            // Simulates "stop all streams": the producer closes individually, moments before
+            // the recording itself is stopped — videoSessions is already empty by the time
+            // teardownRoom() runs.
+            (service as unknown as { notifyProducerClosing: (roomName: string, producerId: string) => void }).notifyProducerClosing(
+                'room1',
+                'producer-1',
+            );
+            expect(state.videoSessions.size).toBe(0);
+
+            await (service as unknown as { teardownRoom: (state: IRoomRecordingState) => Promise<void> }).teardownRoom(state);
+
+            expect(finalized).toBe(true); // teardownRoom() genuinely waited for it, not a no-op
         });
     });
 });
