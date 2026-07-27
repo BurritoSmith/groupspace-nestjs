@@ -360,6 +360,26 @@ export class RoomGateway implements OnGatewayDisconnect {
         this.chatService.saveMessage(message.id, roomName, userId, message.displayName, message.text, new Date(message.at));
     }
 
+    /** Purely ephemeral — no persistence, no ack. socket.to() (not this.server.to()) so the
+     *  typing user never receives their own broadcast back, matching peer-joined's convention. */
+    @SubscribeMessage('user-typing')
+    onUserTyping(@ConnectedSocket() socket: Socket) {
+        const roomName = socket.data.roomName as string;
+        if (!roomName) {
+            return;
+        }
+        socket.to(roomName).emit('user-typing', { peerId: socket.id, displayName: socket.data.displayName ?? 'Anonymous' });
+    }
+
+    @SubscribeMessage('user-stopped-typing')
+    onUserStoppedTyping(@ConnectedSocket() socket: Socket) {
+        const roomName = socket.data.roomName as string;
+        if (!roomName) {
+            return;
+        }
+        socket.to(roomName).emit('user-stopped-typing', { peerId: socket.id });
+    }
+
     @SubscribeMessage('load-earlier-chat-messages')
     async onLoadEarlierChatMessages(@ConnectedSocket() socket: Socket, @MessageBody() payload: { before: string }) {
         const roomName = socket.data.roomName as string | undefined;
