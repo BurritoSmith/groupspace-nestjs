@@ -4,11 +4,13 @@ describe('RoomGateway', () => {
     let gateway: RoomGateway;
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
+    let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
+        fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn() };
         gateway = new RoomGateway(
-            fakeEventEmitter as never, // roomService
+            fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
             {} as never, // googleAuthService
             fakeEventEmitter as never, // recordingService
@@ -55,6 +57,26 @@ describe('RoomGateway', () => {
 
         it('does nothing when the socket has no roomName', () => {
             gateway.onUserStoppedTyping(fakeSocket({}));
+
+            expect(toSpy).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('onMicMuteChanged', () => {
+        it('records the mute state via roomService and broadcasts to the returned roomName', () => {
+            fakeRoomService.setMicSelfMuted.mockReturnValue({ roomName: 'lobby' });
+
+            gateway.onMicMuteChanged(fakeSocket({}), { muted: true });
+
+            expect(fakeRoomService.setMicSelfMuted).toHaveBeenCalledWith('peer-1', true);
+            expect(toSpy).toHaveBeenCalledWith('lobby');
+            expect(emitSpy).toHaveBeenCalledWith('mic-mute-changed', { peerId: 'peer-1', muted: true });
+        });
+
+        it('does nothing when roomService reports the peer is unknown', () => {
+            fakeRoomService.setMicSelfMuted.mockReturnValue(null);
+
+            gateway.onMicMuteChanged(fakeSocket({}), { muted: true });
 
             expect(toSpy).not.toHaveBeenCalled();
         });
