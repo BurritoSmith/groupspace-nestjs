@@ -109,6 +109,35 @@ describe('RecordingService', () => {
         });
     });
 
+    describe('buildFilename', () => {
+        type BuildFilename = (
+            roomName: string,
+            username: string,
+            streamType: string,
+            streamNumber: number,
+            timestamp: string,
+            peerId?: string,
+        ) => string;
+
+        it('produces different filenames for two peers with the same display name, stream type, and timestamp', () => {
+            const buildFilename = (service as unknown as { buildFilename: BuildFilename }).buildFilename.bind(service);
+            // Regression test: this exact collision (same displayName — e.g. the same Google
+            // account signed in on two devices — same streamType, same second-resolution
+            // timestamp, and each peer's own streamNumber independently starting at 1) produced
+            // an identical filename for both peers, so their ffmpeg processes wrote to the same
+            // temp file on disk and silently corrupted one of the two recordings.
+            const first = buildFilename('lobby', 'Clay Crosland', 'webcam', 1, '20260727T074320', 'peer-aaa');
+            const second = buildFilename('lobby', 'Clay Crosland', 'webcam', 1, '20260727T074320', 'peer-bbb');
+            expect(first).not.toBe(second);
+        });
+
+        it('omits the peerId segment entirely when none is given (the mixed-audio track, which has no single owning peer)', () => {
+            const buildFilename = (service as unknown as { buildFilename: BuildFilename }).buildFilename.bind(service);
+            const result = buildFilename('lobby', 'mixed-audio', 'audio', 1, '20260727T074320');
+            expect(result).toBe('lobby-mixed-audio-20260727T074320-audio-1.mp4');
+        });
+    });
+
     describe('remuxToFinalFile', () => {
         it('returns false without invoking ffmpeg when the temp file is missing', async () => {
             const result = await (

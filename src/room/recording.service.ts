@@ -333,7 +333,7 @@ export class RecordingService {
         const streamNumber = this.nextStreamNumber(state, `${info.peerId}:${info.source}`);
         const outputPath = path.join(
             this.recordingsDir,
-            this.buildFilename(state.roomName, info.displayName, info.source, streamNumber, timestamp),
+            this.buildFilename(state.roomName, info.displayName, info.source, streamNumber, timestamp, info.peerId),
         );
 
         // Retries with a fresh PlainTransport + freshly allocated port on failure — our own
@@ -981,8 +981,17 @@ export class RecordingService {
         return next;
     }
 
-    private buildFilename(roomName: string, username: string, streamType: string, streamNumber: number, timestamp: string): string {
-        return `${this.sanitize(roomName)}-${this.sanitize(username)}-${timestamp}-${streamType}-${streamNumber}.mp4`;
+    /** peerId is optional because it doesn't apply to the room's single mixed-audio track (no
+     *  one peer owns it) — every per-peer stream (webcam/screen/mic) must pass it. Without it,
+     *  two peers sharing a display name (e.g. the same Google account signed in on two devices)
+     *  who start the same stream type within the same second-resolution timestamp produce the
+     *  exact same filename — and since the temp recording path is derived from this one, that
+     *  meant two ffmpeg processes writing to the same file on disk, silently corrupting one of
+     *  the two recordings (hasContent: false). peerId is the one thing that's actually unique
+     *  per connection, unlike streamNumber (which resets to 1 independently for each peer). */
+    private buildFilename(roomName: string, username: string, streamType: string, streamNumber: number, timestamp: string, peerId?: string): string {
+        const peerSegment = peerId ? `-${this.sanitizeKebab(peerId)}` : '';
+        return `${this.sanitize(roomName)}-${this.sanitize(username)}${peerSegment}-${timestamp}-${streamType}-${streamNumber}.mp4`;
     }
 
     private sanitize(value: string): string {
@@ -990,6 +999,18 @@ export class RecordingService {
             .replace(/[^A-Za-z0-9_-]/g, '_')
             .replace(/_+/g, '_')
             .replace(/^_|_$/g, '');
+        return cleaned || 'x';
+    }
+
+    /** Same cleanup as sanitize(), but kebab-case (hyphens) rather than underscores — used for
+     *  the peerId segment so it reads visually distinct from the underscore-joined display name
+     *  next to it, rather than blending in as if it were part of the name. */
+    private sanitizeKebab(value: string): string {
+        const cleaned = value
+            .replace(/[^A-Za-z0-9_-]/g, '-')
+            .replace(/_/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
         return cleaned || 'x';
     }
 
