@@ -200,7 +200,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         // user is never forced back to a Google sign-in.
         const sessionToken = this.sessionService.issue(userId);
 
-        const roomName = payload.roomName?.trim() || 'lobby';
+        const roomName = this.normalizeRoomName(payload.roomName);
         const result = await this.roomService.joinRoom(socket.id, roomName, userId, displayName, pictureUrl);
         await socket.join(roomName);
         socket.data.roomName = roomName;
@@ -217,6 +217,19 @@ export class RoomGateway implements OnGatewayDisconnect {
             hasMoreChatHistory: chatHistory.length === HISTORY_PAGE_SIZE,
             iceServers: turnCredentials ? [turnCredentials] : [],
         };
+    }
+
+    /** Room names are case-insensitive — trimmed + lowercased once here, the single earliest
+     *  point every downstream consumer (in-memory router/recording-state Maps, every Socket.IO
+     *  room string, every Prisma Room/RecordingSession/ChatMessage row) derives from, so
+     *  normalizing here alone is sufficient for the whole app. Pulled out as its own method so
+     *  this is testable without exercising the rest of onJoinRoom's session/Google-auth logic. */
+    private normalizeRoomName(raw: string | undefined): string {
+        const normalized = raw?.trim().toLowerCase() ?? '';
+        if (!normalized) {
+            throw new WsException('A room name is required.');
+        }
+        return normalized;
     }
 
     @SubscribeMessage('create-transport')
