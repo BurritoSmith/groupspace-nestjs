@@ -87,6 +87,11 @@ model Recording {
   // query param on the thumbnail URL (the derived filename is identical across the grayscale->color swap).
   startedAt    DateTime         @default(now())
   stoppedAt    DateTime? // null until finalizeVideoSession/finalizeAudioMix runs
+  hasContent   Boolean          @default(true) // false when remux found the temp recording missing/empty or
+  // itself failed — i.e. the producer never emitted a keyframe (a separate, already-diagnosed browser/encoder
+  // issue) or the stream was stopped before any data was captured. stoppedAt is still set either way (it did
+  // stop), but a false here means there's no real file at the URL buildPlaybackUrls would otherwise construct —
+  // playback must never link to it, and PlaybackSync must exclude it from the shared timeline entirely.
 
   @@index([roomName, startedAt])
   @@index([userId])

@@ -22,6 +22,7 @@ describe('RecordingService', () => {
                 gcsPath: null,
                 gcsUploadedAt: null,
                 stoppedAt: null,
+                hasContent: true,
                 thumbnailStatus: null,
                 thumbnailUpdatedAt: null,
             });
@@ -34,10 +35,37 @@ describe('RecordingService', () => {
                 gcsPath: 'room/session/a.mp4',
                 gcsUploadedAt: null,
                 stoppedAt: new Date(),
+                hasContent: true,
                 thumbnailStatus: null,
                 thumbnailUpdatedAt: null,
             });
             expect(url).toContain('/recordings/a.mp4');
+        });
+
+        it('returns a null url when the recording stopped but never captured any content, even though stoppedAt is set', () => {
+            return call({
+                filename: 'a.mp4',
+                gcsPath: null,
+                gcsUploadedAt: null,
+                stoppedAt: new Date(),
+                hasContent: false,
+                thumbnailStatus: null,
+                thumbnailUpdatedAt: null,
+            }).then(({ url }) => expect(url).toBeNull());
+        });
+
+        it('returns a null url for a zero-content recording even once a gcsPath/gcsUploadedAt exist', () => {
+            // Shouldn't happen in practice (uploadAndNotify is gated on hasContent too), but
+            // buildPlaybackUrls must never link to a nonexistent file regardless of upload state.
+            return call({
+                filename: 'a.mp4',
+                gcsPath: 'room/session/a.mp4',
+                gcsUploadedAt: new Date(),
+                stoppedAt: new Date(),
+                hasContent: false,
+                thumbnailStatus: null,
+                thumbnailUpdatedAt: null,
+            }).then(({ url }) => expect(url).toBeNull());
         });
 
         it('returns a null thumbnailUrl when thumbnailStatus is null', async () => {
@@ -46,6 +74,7 @@ describe('RecordingService', () => {
                 gcsPath: null,
                 gcsUploadedAt: null,
                 stoppedAt: new Date(),
+                hasContent: true,
                 thumbnailStatus: null,
                 thumbnailUpdatedAt: null,
             });
@@ -59,6 +88,7 @@ describe('RecordingService', () => {
                 gcsPath: null,
                 gcsUploadedAt: null,
                 stoppedAt: new Date(),
+                hasContent: true,
                 thumbnailStatus: 'live',
                 thumbnailUpdatedAt: updatedAt,
             });
@@ -76,6 +106,15 @@ describe('RecordingService', () => {
         it('derives the thumbnail path via string replace', () => {
             const result = (service as unknown as { thumbnailPath: (p: string) => string }).thumbnailPath('/recordings/a.mp4');
             expect(result).toBe('/recordings/a.thumb.jpg');
+        });
+    });
+
+    describe('remuxToFinalFile', () => {
+        it('returns false without invoking ffmpeg when the temp file is missing', async () => {
+            const result = await (
+                service as unknown as { remuxToFinalFile: (tempPath: string, finalPath: string) => Promise<boolean> }
+            ).remuxToFinalFile('/nonexistent/path/does-not-exist.recording.mp4', '/nonexistent/path/does-not-exist.mp4');
+            expect(result).toBe(false);
         });
     });
 });

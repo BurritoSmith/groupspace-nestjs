@@ -24,6 +24,7 @@ interface IPlaybackUrlSourceRow {
     gcsPath: string | null;
     gcsUploadedAt: Date | null;
     stoppedAt: Date | null;
+    hasContent: boolean;
     thumbnailStatus: string | null;
     thumbnailUpdatedAt: Date | null;
 }
@@ -121,6 +122,7 @@ export class RecordingService {
                     // self-correct later via a separate durationchange event).
                     startedAt: recording.startedAt.toISOString(),
                     stoppedAt: recording.stoppedAt?.toISOString() ?? null,
+                    hasContent: recording.hasContent,
                 };
             }),
         );
@@ -188,11 +190,12 @@ export class RecordingService {
      *  identically. Serves the local VM file until gcsUploadedAt confirms the upload actually landed
      *  (not merely that gcsPath, the deterministic intended path, has been assigned). */
     private async buildPlaybackUrls(r: IPlaybackUrlSourceRow): Promise<{ url: string | null; thumbnailUrl: string | null }> {
-        const url = !r.stoppedAt
-            ? null // final file doesn't exist until remux completes
-            : r.gcsUploadedAt && this.gcsBucketName
-              ? await this.getSignedUrl(r.gcsPath)
-              : this.buildLocalFileUrl(r.filename);
+        const url =
+            !r.stoppedAt || !r.hasContent
+                ? null // final file doesn't exist yet, or never will (the recording captured nothing)
+                : r.gcsUploadedAt && this.gcsBucketName
+                  ? await this.getSignedUrl(r.gcsPath)
+                  : this.buildLocalFileUrl(r.filename);
         const thumbnailUrl = r.thumbnailStatus ? this.buildLocalThumbnailUrl(r.filename, r.thumbnailUpdatedAt) : null;
         return { url, thumbnailUrl };
     }
@@ -416,7 +419,8 @@ export class RecordingService {
                 await consumer.requestKeyFrame();
 
                 const dbId = randomUUID();
-                await this.prisma.recording
+                const startedAt = new Date();
+                const created = await this.prisma.recording
                     .create({
                         data: {
                             id: dbId,
@@ -427,12 +431,27 @@ export class RecordingService {
                             streamType: info.source,
                             streamNumber,
                             filename: path.basename(outputPath),
-                            startedAt: new Date(),
+                            startedAt,
                         },
                     })
-                    .catch((error: unknown) =>
-                        this.logger.error(`Failed to persist recording metadata for producer ${info.producerId}: ${error}`),
-                    );
+                    .catch((error: unknown) => {
+                        this.logger.error(`Failed to persist recording metadata for producer ${info.producerId}: ${error}`);
+                        return null;
+                    });
+                // Lets a viewer already on this session's (still-recording) playback page see this
+                // stream appear live, instead of only ever reflecting whatever existed when their
+                // page first loaded — only emitted once the row genuinely exists, matching the
+                // hasContent lesson: never tell playback clients about something that isn't there.
+                if (created) {
+                    this.events.emit('recording-added', {
+                        sessionId: state.sessionDbId,
+                        recordingId: dbId,
+                        filename: path.basename(outputPath),
+                        streamType: info.source,
+                        displayName: info.displayName,
+                        startedAt: startedAt.toISOString(),
+                    });
+                }
 
                 state.videoSessions.set(info.producerId, {
                     producerId: info.producerId,
@@ -490,24 +509,30 @@ export class RecordingService {
         this.releasePort(session.destPort);
         void fs.unlink(session.sdpPath).catch(() => undefined);
 
-        await this.remuxToFinalFile(this.tempRecordingPath(session.outputPath), session.outputPath);
+        const hasContent = await this.remuxToFinalFile(this.tempRecordingPath(session.outputPath), session.outputPath);
 
         // Locally available now — independent of GCS, which is why this write can't wait on it.
+        const stoppedAt = new Date();
         await this.prisma.recording
-            .update({ where: { id: session.dbId }, data: { stoppedAt: new Date() } })
+            .update({ where: { id: session.dbId }, data: { stoppedAt, hasContent } })
             .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for recording ${session.dbId}: ${error}`));
         this.events.emit('recording-ready', {
             sessionId: state.sessionDbId,
             recordingId: session.dbId,
-            url: this.buildLocalFileUrl(path.basename(session.outputPath)),
+            url: hasContent ? this.buildLocalFileUrl(path.basename(session.outputPath)) : null,
+            stoppedAt: stoppedAt.toISOString(),
+            hasContent,
         });
 
-        void this.generateFinalThumbnail(state, session).catch((error: unknown) =>
-            this.logger.warn(`Final thumbnail generation failed for recording ${session.dbId}: ${error}`),
-        );
-        void this.uploadAndNotify(state, session.outputPath, session.dbId).catch((error: unknown) =>
-            this.logger.error(`Post-finalize GCS upload failed for recording ${session.dbId}: ${error}`),
-        );
+        // Nothing to thumbnail or upload for a recording that captured no data.
+        if (hasContent) {
+            void this.generateFinalThumbnail(state, session).catch((error: unknown) =>
+                this.logger.warn(`Final thumbnail generation failed for recording ${session.dbId}: ${error}`),
+            );
+            void this.uploadAndNotify(state, session.outputPath, session.dbId).catch((error: unknown) =>
+                this.logger.error(`Post-finalize GCS upload failed for recording ${session.dbId}: ${error}`),
+            );
+        }
     }
 
     private async startAudioMix(
@@ -582,7 +607,8 @@ export class RecordingService {
                 }
 
                 const dbId = randomUUID();
-                await this.prisma.recording
+                const startedAt = new Date();
+                const created = await this.prisma.recording
                     .create({
                         data: {
                             id: dbId,
@@ -592,10 +618,26 @@ export class RecordingService {
                             streamType: 'audio',
                             streamNumber,
                             filename: path.basename(outputPath),
-                            startedAt: new Date(),
+                            startedAt,
                         },
                     })
-                    .catch((error: unknown) => this.logger.error(`Failed to persist audio-mix recording metadata for room ${state.roomName}: ${error}`));
+                    .catch((error: unknown) => {
+                        this.logger.error(`Failed to persist audio-mix recording metadata for room ${state.roomName}: ${error}`);
+                        return null;
+                    });
+                // Mirrors startVideoSession's notification — a mic-set change mid-session
+                // (restartAudioMix finalizing the old row and calling back into startAudioMix)
+                // also needs to tell a live viewer a new row now exists.
+                if (created) {
+                    this.events.emit('recording-added', {
+                        sessionId: state.sessionDbId,
+                        recordingId: dbId,
+                        filename: path.basename(outputPath),
+                        streamType: 'audio',
+                        displayName: 'mixed-audio',
+                        startedAt: startedAt.toISOString(),
+                    });
+                }
 
                 state.audioMix = { inputs, outputPath, ffmpeg, dbId };
                 return;
@@ -636,22 +678,27 @@ export class RecordingService {
             this.releasePort(input.destPort);
             void fs.unlink(input.sdpPath).catch(() => undefined);
         }
-        await this.remuxToFinalFile(this.tempRecordingPath(mix.outputPath), mix.outputPath);
+        const hasContent = await this.remuxToFinalFile(this.tempRecordingPath(mix.outputPath), mix.outputPath);
 
         // Same decoupling as finalizeVideoSession — locally available now, GCS upload is separate.
         // No thumbnail for audio: streamType 'audio' has no thumbnail concept.
+        const stoppedAt = new Date();
         await this.prisma.recording
-            .update({ where: { id: mix.dbId }, data: { stoppedAt: new Date() } })
+            .update({ where: { id: mix.dbId }, data: { stoppedAt, hasContent } })
             .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for audio-mix recording ${mix.dbId}: ${error}`));
         this.events.emit('recording-ready', {
             sessionId: state.sessionDbId,
             recordingId: mix.dbId,
-            url: this.buildLocalFileUrl(path.basename(mix.outputPath)),
+            url: hasContent ? this.buildLocalFileUrl(path.basename(mix.outputPath)) : null,
+            stoppedAt: stoppedAt.toISOString(),
+            hasContent,
         });
 
-        void this.uploadAndNotify(state, mix.outputPath, mix.dbId).catch((error: unknown) =>
-            this.logger.error(`Post-finalize GCS upload failed for audio-mix recording ${mix.dbId}: ${error}`),
-        );
+        if (hasContent) {
+            void this.uploadAndNotify(state, mix.outputPath, mix.dbId).catch((error: unknown) =>
+                this.logger.error(`Post-finalize GCS upload failed for audio-mix recording ${mix.dbId}: ${error}`),
+            );
+        }
     }
 
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
@@ -720,23 +767,33 @@ export class RecordingService {
      * temp file's actual total duration even though it has no central index.
      * Best-effort: logs and keeps the temp file (rather than throwing) if the
      * remux itself fails, so a stop/close action never fails because of this.
+     *
+     * Returns whether a real, playable final file actually exists now — callers use this to set
+     * Recording.hasContent. A producer that never emitted a keyframe (a separate, already-diagnosed
+     * browser/encoder issue) or a stream stopped before any frame arrived leaves the temp file
+     * missing/empty; without this signal, a zero-content recording still got a plausible-looking
+     * stoppedAt and a URL pointing at a file that doesn't exist, silently poisoning every consumer
+     * of it (the shared playback timeline waits forever for a 'seeked' event that a 404'd <video>
+     * can never fire).
      */
-    private async remuxToFinalFile(tempPath: string, finalPath: string): Promise<void> {
+    private async remuxToFinalFile(tempPath: string, finalPath: string): Promise<boolean> {
         try {
             const stat = await fs.stat(tempPath).catch(() => null);
             if (!stat || stat.size === 0) {
                 this.logger.warn(`Recording temp file ${tempPath} is missing or empty — nothing to remux`);
-                return;
+                return false;
             }
             await this.runFfmpegToCompletion(
                 ['-y', '-i', tempPath, '-c', 'copy', '-movflags', '+faststart', finalPath],
                 `remux ${path.basename(finalPath)}`,
             );
             void fs.unlink(tempPath).catch(() => undefined);
+            return true;
         } catch (error) {
             this.logger.error(
                 `Failed to remux ${tempPath} -> ${finalPath} (temp file kept): ${error instanceof Error ? error.message : error}`,
             );
+            return false;
         }
     }
 

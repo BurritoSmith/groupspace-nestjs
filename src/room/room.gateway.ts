@@ -63,8 +63,20 @@ export class RoomGateway implements OnGatewayDisconnect {
         // cleanup is needed on this side (see subscribe/unsubscribe handlers' comment).
         this.recordingService.events.on(
             'recording-ready',
-            ({ sessionId, recordingId, url }: { sessionId: string; recordingId: string; url: string }) => {
-                this.server.to(`recording-session:${sessionId}`).emit('recording-ready', { recordingId, url });
+            ({
+                sessionId,
+                recordingId,
+                url,
+                stoppedAt,
+                hasContent,
+            }: {
+                sessionId: string;
+                recordingId: string;
+                url: string | null;
+                stoppedAt: string;
+                hasContent: boolean;
+            }) => {
+                this.server.to(`recording-session:${sessionId}`).emit('recording-ready', { recordingId, url, stoppedAt, hasContent });
             },
         );
         this.recordingService.events.on(
@@ -87,6 +99,32 @@ export class RoomGateway implements OnGatewayDisconnect {
             'recording-uploaded',
             ({ sessionId, recordingId, url }: { sessionId: string; recordingId: string; url: string | null }) => {
                 this.server.to(`recording-session:${sessionId}`).emit('recording-uploaded', { recordingId, url });
+            },
+        );
+        // A brand-new stream (webcam/screen start, or a mic-set change creating a fresh
+        // mixed-audio row) starting while someone is already viewing this session's playback
+        // page — lets that viewer's tile grid grow live instead of only ever reflecting
+        // whatever existed at page load.
+        this.recordingService.events.on(
+            'recording-added',
+            ({
+                sessionId,
+                recordingId,
+                filename,
+                streamType,
+                displayName,
+                startedAt,
+            }: {
+                sessionId: string;
+                recordingId: string;
+                filename: string;
+                streamType: string;
+                displayName: string;
+                startedAt: string;
+            }) => {
+                this.server
+                    .to(`recording-session:${sessionId}`)
+                    .emit('recording-added', { recordingId, filename, streamType, displayName, startedAt });
             },
         );
     }

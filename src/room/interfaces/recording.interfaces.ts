@@ -76,6 +76,11 @@ export interface IRecordingSummary {
      *  so the frontend can compute each recording's actual duration from our own bookkeeping
      *  instead of trusting the browser's <video>.duration. */
     stoppedAt: string | null;
+    /** False when the stream stopped but never actually captured any data (the producer never
+     *  emitted a keyframe, or was stopped before any frame arrived) — stoppedAt is still set in
+     *  that case, but url stays null forever and the frontend must exclude this recording from
+     *  the shared playback timeline entirely, not just leave it with an unplayable link. */
+    hasContent: boolean;
 }
 
 export interface IRecordingSessionDetail extends IRecordingSessionSummary {
