@@ -15,6 +15,7 @@ import { ChatService, HISTORY_PAGE_SIZE } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
 import { RecordingService } from './recording.service';
 import { RoomService } from './room.service';
+import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
 import { UsersService } from './users.service';
 import type {
@@ -50,6 +51,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         private readonly recordingService: RecordingService,
         private readonly usersService: UsersService,
         private readonly chatService: ChatService,
+        private readonly sessionService: SessionService,
     ) {
         this.roomService.events.on('active-speakers', ({ roomName, peerIds }: { roomName: string; peerIds: string[] }) => {
             this.server.to(roomName).emit('active-speakers', { peerIds });
@@ -161,23 +163,52 @@ export class RoomGateway implements OnGatewayDisconnect {
 
     @SubscribeMessage('join-room')
     async onJoinRoom(@ConnectedSocket() socket: Socket, @MessageBody() payload: IJoinRoomPayload) {
-        const profile = await this.googleAuthService.verify(payload.googleIdToken);
-        if (!profile) {
-            throw new WsException('Google sign-in could not be verified.');
+        let userId: string;
+        let displayName: string;
+        let pictureUrl: string;
+
+        if (payload.sessionToken) {
+            // Returning session — resume without touching Google at all. The exact message
+            // below is matched on by the frontend to distinguish "truly signed out, go back to
+            // the login screen" from any other join failure.
+            const session = this.sessionService.verify(payload.sessionToken);
+            const user = session && (await this.usersService.findById(session.userId));
+            if (!user) {
+                throw new WsException('Session expired. Please sign in again.');
+            }
+            ({ id: userId, displayName, pictureUrl } = user);
+        } else {
+            // Fresh sign-in — the only path that ever talks to Google, and the only one that
+            // creates/updates the User row.
+            const profile = await this.googleAuthService.verify(payload.googleIdToken ?? '');
+            if (!profile) {
+                throw new WsException('Google sign-in could not be verified.');
+            }
+            const user = await this.usersService.upsertFromGoogleProfile(profile);
+            userId = user.id;
+            displayName = profile.displayName;
+            pictureUrl = profile.pictureUrl;
         }
-        const user = await this.usersService.upsertFromGoogleProfile(profile);
+
+        // Reissued on every successful join regardless of which path was taken above — this is
+        // what gives the session a sliding expiry rather than one fixed deadline from first
+        // sign-in: as long as the app gets used at least once within the token's lifetime, the
+        // user is never forced back to a Google sign-in.
+        const sessionToken = this.sessionService.issue(userId);
+
         const roomName = payload.roomName?.trim() || 'lobby';
-        const result = await this.roomService.joinRoom(socket.id, roomName, user.id, profile.displayName, profile.pictureUrl);
+        const result = await this.roomService.joinRoom(socket.id, roomName, userId, displayName, pictureUrl);
         await socket.join(roomName);
         socket.data.roomName = roomName;
-        socket.data.displayName = profile.displayName;
-        socket.data.userId = user.id;
-        socket.to(roomName).emit('peer-joined', { peerId: socket.id, displayName: profile.displayName, pictureUrl: profile.pictureUrl });
+        socket.data.displayName = displayName;
+        socket.data.userId = userId;
+        socket.to(roomName).emit('peer-joined', { peerId: socket.id, displayName, pictureUrl });
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
         return {
             ...result,
-            userId: user.id,
+            userId,
+            sessionToken,
             chatHistory,
             hasMoreChatHistory: chatHistory.length === HISTORY_PAGE_SIZE,
             iceServers: turnCredentials ? [turnCredentials] : [],

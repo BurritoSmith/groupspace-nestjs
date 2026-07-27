@@ -27,7 +27,11 @@ export interface IProducerSummary {
 
 export interface IJoinRoomPayload {
     roomName: string;
-    googleIdToken: string;
+    // Exactly one of these is expected: googleIdToken for a fresh Google sign-in (the very
+    // first join, or whenever no still-valid session token exists yet), sessionToken for every
+    // subsequent join — see SessionService and room.gateway.ts's onJoinRoom.
+    googleIdToken?: string;
+    sessionToken?: string;
 }
 
 export interface IJoinRoomResult {

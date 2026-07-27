@@ -30,4 +30,11 @@ export class UsersService {
         });
         return { id: user.id, displayName: user.displayName, pictureUrl: user.pictureUrl };
     }
+
+    /** Looks up a user by their own app-issued id — used to resume a session token without
+     *  needing to re-verify anything with Google (see SessionService/room.gateway.ts). */
+    async findById(id: string): Promise<IUserRecord | null> {
+        const user = await this.prisma.user.findUnique({ where: { id } });
+        return user ? { id: user.id, displayName: user.displayName, pictureUrl: user.pictureUrl } : null;
+    }
 }
