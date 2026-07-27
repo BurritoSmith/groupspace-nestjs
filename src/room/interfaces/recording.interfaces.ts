@@ -58,10 +58,15 @@ export interface IRecordingSummary {
     filename: string;
     streamType: string;
     displayName: string;
-    /** A signed, time-limited Cloud Storage URL when RECORDINGS_GCS_BUCKET is configured
-     *  (production), or a link to the file served straight off local disk otherwise (local
-     *  dev). Only null if the recording has no gcsPath and GCS isn't configured either. */
+    /** Local VM URL until the GCS upload is confirmed complete (gcsUploadedAt), then the signed
+     *  Cloud Storage URL — see RecordingService.buildPlaybackUrls. Null until the recording stops
+     *  (the file doesn't exist yet) or if GCS isn't configured and the local file is unreachable. */
     url: string | null;
+    /** Grayscale while thumbnailStatus is 'live' (mid-recording snapshot), full color once 'final'
+     *  (extracted from the finished, remuxed file). Null for audio-only recordings and before the
+     *  first extraction attempt has run. Always served from local disk — see RecordingService's
+     *  local-only-thumbnails design choice. */
+    thumbnailUrl: string | null;
 }
 
 export interface IRecordingSessionDetail extends IRecordingSessionSummary {

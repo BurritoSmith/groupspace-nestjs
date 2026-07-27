@@ -75,7 +75,16 @@ model Recording {
   streamNumber Int
   filename     String
   gcsPath      String? // <roomName>/<sessionName>/<filename> in RECORDINGS_GCS_BUCKET, when configured
-  // (production/GCP only — local dev keeps writing to disk and leaves this null).
+  // (production/GCP only — local dev keeps writing to disk and leaves this null). Set to the deterministic
+  // intended path regardless of upload success — see gcsUploadedAt for whether it's actually there yet.
+  gcsUploadedAt DateTime? // null until the GCS upload actually succeeds. Distinguishes "gcsPath is the intended
+  // path" from "confirmed present in the bucket" — playback serves the local VM file until this is set, then
+  // hands off to the signed GCS URL. Stays null forever in local dev (no bucket configured).
+  thumbnailStatus    String? // 'live' | 'final' — plain String, matching streamType's own convention over a
+  // Prisma enum for a small state machine. Null = no thumbnail yet (mid-recording, before the first extraction
+  // attempt, or extraction failed), or permanently null for streamType 'audio' (no thumbnail concept).
+  thumbnailUpdatedAt DateTime? // set every time the thumbnail file is (re)written. Doubles as the cache-busting
+  // query param on the thumbnail URL (the derived filename is identical across the grayscale->color swap).
   startedAt    DateTime         @default(now())
   stoppedAt    DateTime? // null until finalizeVideoSession/finalizeAudioMix runs
 
