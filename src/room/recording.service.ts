@@ -9,8 +9,6 @@ import * as path from 'node:path';
 import { types as mediasoupTypes } from 'mediasoup';
 import { PrismaService } from '../prisma/prisma.service';
 import {
-    IRecordingAudioInput,
-    IRecordingAudioMixSession,
     IRecordingProducerInfo,
     IRecordingSessionDetail,
     IRecordingSessionSummary,
@@ -36,11 +34,12 @@ interface IPlaybackUrlSourceRow {
  * namespace directly, no Docker port-mapping needed). Video streams are
  * transcoded to H.264 (mediasoup's own codec is VP8; VP8-in-MP4 has patchy
  * playback support, so we pay the transcode cost for universal .mp4 output).
- * All mic producers are mixed into one combined-audio track per ffmpeg's
- * `amix` filter, which requires a fixed input set at process start — so the
- * audio mix is fully restarted (new file, fresh timestamp) whenever the set
- * of active mics changes, mirroring the "new stream = new timestamped file"
- * rule that already applies to video.
+ * Every producer — webcam, screen, AND mic — gets its own fully independent
+ * recording session (one PlainTransport, one ffmpeg process, one Recording
+ * row), synced together afterward on the shared playback timeline via each
+ * row's own startedAt/stoppedAt. Mic audio is no longer mixed into one
+ * combined track; each participant's mic is recorded and attributed to them
+ * individually.
  */
 @Injectable()
 export class RecordingService {
@@ -98,7 +97,7 @@ export class RecordingService {
     async getSessionDetail(sessionId: string): Promise<IRecordingSessionDetail | null> {
         const session = await this.prisma.recordingSession.findUnique({
             where: { id: sessionId },
-            include: { recordings: true },
+            include: { recordings: { include: { user: true } } },
         });
         if (!session) {
             return null;
@@ -111,6 +110,8 @@ export class RecordingService {
                     filename: recording.filename,
                     streamType: recording.streamType,
                     displayName: recording.displayName,
+                    userId: recording.userId,
+                    pictureUrl: recording.user?.pictureUrl ?? null,
                     url,
                     thumbnailUrl,
                     // Lets the frontend align streams on one shared timeline even when they
@@ -226,19 +227,16 @@ export class RecordingService {
             sessionDbId,
             sessionName: defaultSessionName,
             videoSessions: new Map(),
-            audioMix: null,
-            audioMixLock: Promise.resolve(),
             streamNumberCounters: new Map(),
         };
         // Set before awaiting so a concurrent start-recording call for the same room fails fast.
         this.rooms.set(roomName, state);
 
         try {
-            for (const producer of snapshot.producers.filter((p) => p.source !== 'mic')) {
+            // webcam, screen, AND mic all go through the same per-producer session now.
+            for (const producer of snapshot.producers) {
                 await this.startVideoSession(state, snapshot.router, producer);
             }
-            const mics = snapshot.producers.filter((p) => p.source === 'mic');
-            await this.withAudioMixLock(state, () => this.startAudioMix(state, snapshot.router, mics));
         } catch (error) {
             this.rooms.delete(roomName);
             await this.teardownRoom(state);
@@ -271,10 +269,11 @@ export class RecordingService {
         this.events.emit('recording-state', { roomName, isRecording: false });
     }
 
-    /** Fire-and-forget hook for a newly created webcam/screen producer. No-op if the room isn't being recorded. */
+    /** Fire-and-forget hook for a newly created producer — webcam, screen, or mic, each gets its
+     *  own fully independent recording session. No-op if the room isn't being recorded. */
     notifyProducerCreated(roomName: string, router: mediasoupTypes.Router, producer: IRecordingProducerInfo): void {
         const state = this.rooms.get(roomName);
-        if (!state || producer.source === 'mic') {
+        if (!state) {
             return;
         }
         void this.startVideoSession(state, router, producer).catch((error: unknown) =>
@@ -282,7 +281,7 @@ export class RecordingService {
         );
     }
 
-    /** Fire-and-forget hook for a closing webcam/screen producer. No-op if there's no recording session for it. */
+    /** Fire-and-forget hook for a closing producer — webcam, screen, or mic. No-op if there's no recording session for it. */
     notifyProducerClosing(roomName: string, producerId: string): void {
         const state = this.rooms.get(roomName);
         const session = state?.videoSessions.get(producerId);
@@ -295,40 +294,12 @@ export class RecordingService {
         );
     }
 
-    /** Fire-and-forget hook called whenever the room's active-mic set changes (add or remove). No-op if unchanged or not recording. */
-    notifyMicProducersChanged(roomName: string, router: mediasoupTypes.Router, activeMics: IRecordingProducerInfo[]): void {
-        const state = this.rooms.get(roomName);
-        if (!state) {
-            return;
-        }
-        const currentIds = new Set(state.audioMix?.inputs.map((i) => i.producerId) ?? []);
-        const newIds = new Set(activeMics.map((m) => m.producerId));
-        if (currentIds.size === newIds.size && [...currentIds].every((id) => newIds.has(id))) {
-            return;
-        }
-        void this.withAudioMixLock(state, () => this.restartAudioMix(state, router, activeMics)).catch((error: unknown) =>
-            this.logger.error(`Failed to restart audio mix for room ${roomName}: ${error}`),
-        );
-    }
-
-    /**
-     * Serializes every audio-mix mutation for a room onto one chain, so a mic
-     * changing state while the initial snapshot is still being processed
-     * can't run concurrently with it and silently orphan an untracked ffmpeg
-     * process (two overlapping calls both reading/overwriting state.audioMix
-     * is the failure mode this prevents).
-     */
-    private withAudioMixLock(state: IRoomRecordingState, fn: () => Promise<void>): Promise<void> {
-        const run = state.audioMixLock.then(fn, fn);
-        state.audioMixLock = run.catch(() => undefined);
-        return run;
-    }
-
     private async startVideoSession(
         state: IRoomRecordingState,
         router: mediasoupTypes.Router,
         info: IRecordingProducerInfo,
     ): Promise<void> {
+        const isAudio = info.source === 'mic';
         const timestamp = this.formatTimestampUtc(new Date());
         const streamNumber = this.nextStreamNumber(state, `${info.peerId}:${info.source}`);
         const outputPath = path.join(
@@ -360,63 +331,17 @@ export class RecordingService {
                 });
                 const codec = consumer.rtpParameters.codecs[0];
                 sdpPath = path.join(this.sdpScratchDir, `${info.producerId}-${Date.now()}-${attempt}.sdp`);
-                await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, 'video'));
+                await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, isAudio ? 'audio' : 'video'));
 
                 const ffmpeg = await this.spawnFfmpegAndWaitReady(
-                    [
-                        '-n',
-                        '-protocol_whitelist',
-                        'file,udp,rtp',
-                        // Without this, ffmpeg trusts the RTP stream's raw 90kHz clock timestamps
-                        // as-is, which — combined with no explicit output frame rate below — led it
-                        // to infer a bogus ~90000fps output cadence and pad tens of thousands of
-                        // duplicate frames into a couple hundred milliseconds of container duration
-                        // (players then show 0:00/no scrubber, since that IS the file's real
-                        // declared duration). Wall-clock timestamps reflect when packets actually
-                        // arrived instead.
-                        '-use_wallclock_as_timestamps',
-                        '1',
-                        '-i',
-                        sdpPath,
-                        '-c:v',
-                        'libx264',
-                        '-preset',
-                        'veryfast',
-                        // Disables B-frames/lookahead buffering — without this, x264 can
-                        // hold several frames internally before any encoded output is
-                        // available to write at all, regardless of forced keyframe timing.
-                        // A stream stopped within that first ~second could flush nothing
-                        // even with a keyframe forced at t=0.
-                        '-tune',
-                        'zerolatency',
-                        // Forces a keyframe (and therefore a flushed fragment, since
-                        // frag_keyframe below fragments AT each keyframe) every 2s
-                        // starting at t=0 — without this, libx264's default ~8-10s
-                        // keyframe interval means a stream stopped shortly after starting
-                        // can flush nothing at all (moov atom not found).
-                        '-force_key_frames',
-                        'expr:gte(t,n_forced*2)',
-                        // Pins the OUTPUT to a real, fixed frame rate — the other half of the
-                        // duplicate-frame/bogus-duration fix above. Without this, ffmpeg still has
-                        // to guess an output cadence from the (now wall-clock) input timestamps.
-                        '-r',
-                        '30',
-                        '-fps_mode',
-                        'cfr',
-                        // empty_moov means this recording target has no upfront duration
-                        // index — needed for resilience against an abrupt kill, but it's
-                        // why players show 0:00/no scrubber. finalizeVideoSession remuxes
-                        // this temp file into a normal indexed mp4 at outputPath once the
-                        // stream stops, which is what actually gets kept.
-                        '-movflags',
-                        '+frag_keyframe+empty_moov+faststart',
-                        this.tempRecordingPath(outputPath),
-                    ],
-                    `video ${info.producerId} port=${destPort} attempt=${attempt}`,
+                    this.buildRecordingFfmpegArgs(isAudio, sdpPath, this.tempRecordingPath(outputPath)),
+                    `${info.source} ${info.producerId} port=${destPort} attempt=${attempt}`,
                 );
 
                 await consumer.resume();
-                await consumer.requestKeyFrame();
+                if (!isAudio) {
+                    await consumer.requestKeyFrame();
+                }
 
                 const dbId = randomUUID();
                 const startedAt = new Date();
@@ -433,6 +358,7 @@ export class RecordingService {
                             filename: path.basename(outputPath),
                             startedAt,
                         },
+                        include: { user: true },
                     })
                     .catch((error: unknown) => {
                         this.logger.error(`Failed to persist recording metadata for producer ${info.producerId}: ${error}`);
@@ -449,6 +375,8 @@ export class RecordingService {
                         filename: path.basename(outputPath),
                         streamType: info.source,
                         displayName: info.displayName,
+                        userId: created.userId,
+                        pictureUrl: created.user?.pictureUrl ?? null,
                         startedAt: startedAt.toISOString(),
                     });
                 }
@@ -457,7 +385,7 @@ export class RecordingService {
                     producerId: info.producerId,
                     peerId: info.peerId,
                     displayName: info.displayName,
-                    source: info.source as 'webcam' | 'screen',
+                    source: info.source,
                     transport,
                     consumer,
                     destPort,
@@ -467,21 +395,24 @@ export class RecordingService {
                     dbId,
                 });
 
-                // Grace period comfortably after the first forced-keyframe fragment flush (2s
-                // interval, see the -force_key_frames comment above) so there's actually something
-                // in the temp file to extract a frame from. Re-reads the live map by dbId at fire
-                // time rather than tracking a cancelable timer handle — a session that's since
-                // stopped or been replaced simply won't match, and generateFinalThumbnail covers it.
-                const GRACE_MS = 3000;
-                setTimeout(() => {
-                    const current = state.videoSessions.get(info.producerId);
-                    if (!current || current.dbId !== dbId) {
-                        return;
-                    }
-                    void this.generateLiveThumbnail(state, current).catch((error: unknown) =>
-                        this.logger.warn(`Live thumbnail generation failed for producer ${info.producerId}: ${error}`),
-                    );
-                }, GRACE_MS);
+                // Audio has no thumbnail concept — only schedule this for video sources.
+                if (!isAudio) {
+                    // Grace period comfortably after the first forced-keyframe fragment flush (2s
+                    // interval, see the -force_key_frames comment above) so there's actually something
+                    // in the temp file to extract a frame from. Re-reads the live map by dbId at fire
+                    // time rather than tracking a cancelable timer handle — a session that's since
+                    // stopped or been replaced simply won't match, and generateFinalThumbnail covers it.
+                    const GRACE_MS = 3000;
+                    setTimeout(() => {
+                        const current = state.videoSessions.get(info.producerId);
+                        if (!current || current.dbId !== dbId) {
+                            return;
+                        }
+                        void this.generateLiveThumbnail(state, current).catch((error: unknown) =>
+                            this.logger.warn(`Live thumbnail generation failed for producer ${info.producerId}: ${error}`),
+                        );
+                    }, GRACE_MS);
+                }
                 return;
             } catch (error) {
                 lastError = error;
@@ -496,6 +427,64 @@ export class RecordingService {
             }
         }
         throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+
+    /** Pulled out of startVideoSession as its own pure function so the audio-vs-video branch is
+     *  directly unit-testable without spinning up a real mediasoup Router/ffmpeg process. */
+    private buildRecordingFfmpegArgs(isAudio: boolean, sdpPath: string, tempOutputPath: string): string[] {
+        const codecArgs = isAudio
+            ? ['-c:a', 'aac', '-b:a', '128k']
+            : [
+                  '-c:v',
+                  'libx264',
+                  '-preset',
+                  'veryfast',
+                  // Disables B-frames/lookahead buffering — without this, x264 can hold several
+                  // frames internally before any encoded output is available to write at all,
+                  // regardless of forced keyframe timing. A stream stopped within that first
+                  // ~second could flush nothing even with a keyframe forced at t=0.
+                  '-tune',
+                  'zerolatency',
+                  // Forces a keyframe (and therefore a flushed fragment, since frag_keyframe
+                  // below fragments AT each keyframe) every 2s starting at t=0 — without this,
+                  // libx264's default ~8-10s keyframe interval means a stream stopped shortly
+                  // after starting can flush nothing at all (moov atom not found).
+                  '-force_key_frames',
+                  'expr:gte(t,n_forced*2)',
+                  // Pins the OUTPUT to a real, fixed frame rate — the other half of the
+                  // duplicate-frame/bogus-duration fix below. Without this, ffmpeg still has to
+                  // guess an output cadence from the (now wall-clock) input timestamps.
+                  '-r',
+                  '30',
+                  '-fps_mode',
+                  'cfr',
+              ];
+        // Audio has no keyframe concept — fragment after literally every AAC frame (~21ms)
+        // rather than on a timer, so even a mic on for under a second still flushes something
+        // valid instead of an empty/unremuxable temp file.
+        const movflags = isAudio ? '+frag_every_frame+empty_moov+faststart' : '+frag_keyframe+empty_moov+faststart';
+        return [
+            '-n',
+            '-protocol_whitelist',
+            'file,udp,rtp',
+            // Without this, ffmpeg trusts the RTP stream's raw clock timestamps as-is, which
+            // (combined with no explicit output frame rate for video) led it to infer a bogus
+            // output cadence and pad in duplicate frames/mis-derive the container duration
+            // (players then show 0:00/no scrubber, since that IS the file's real declared
+            // duration). Wall-clock timestamps reflect when packets actually arrived instead.
+            '-use_wallclock_as_timestamps',
+            '1',
+            '-i',
+            sdpPath,
+            ...codecArgs,
+            // empty_moov means this recording target has no upfront duration index — needed for
+            // resilience against an abrupt kill, but it's why players show 0:00/no scrubber.
+            // finalizeVideoSession remuxes this temp file into a normal indexed mp4 once the
+            // stream stops, which is what actually gets kept.
+            '-movflags',
+            movflags,
+            tempOutputPath,
+        ];
     }
 
     /** Splits into two phases on purpose: the recording becomes locally available and its
@@ -524,188 +513,22 @@ export class RecordingService {
             hasContent,
         });
 
-        // Nothing to thumbnail or upload for a recording that captured no data.
+        // Nothing to thumbnail or upload for a recording that captured no data. Audio has no
+        // thumbnail concept at all, regardless of hasContent.
         if (hasContent) {
-            void this.generateFinalThumbnail(state, session).catch((error: unknown) =>
-                this.logger.warn(`Final thumbnail generation failed for recording ${session.dbId}: ${error}`),
-            );
+            if (session.source !== 'mic') {
+                void this.generateFinalThumbnail(state, session).catch((error: unknown) =>
+                    this.logger.warn(`Final thumbnail generation failed for recording ${session.dbId}: ${error}`),
+                );
+            }
             void this.uploadAndNotify(state, session.outputPath, session.dbId).catch((error: unknown) =>
                 this.logger.error(`Post-finalize GCS upload failed for recording ${session.dbId}: ${error}`),
             );
         }
     }
 
-    private async startAudioMix(
-        state: IRoomRecordingState,
-        router: mediasoupTypes.Router,
-        mics: IRecordingProducerInfo[],
-    ): Promise<void> {
-        if (mics.length === 0) {
-            return; // nothing to record yet — wait for the first mic
-        }
-        const timestamp = this.formatTimestampUtc(new Date());
-        const streamNumber = this.nextStreamNumber(state, 'mixed-audio:audio');
-        const outputPath = path.join(
-            this.recordingsDir,
-            this.buildFilename(state.roomName, 'mixed-audio', 'audio', streamNumber, timestamp),
-        );
-
-        // Same rationale as startVideoSession: our port bookkeeping can't guarantee a chosen
-        // port is actually free at the OS level, so retry the whole input set (fresh transports,
-        // fresh ports) if the shared ffmpeg process fails to start.
-        const MAX_ATTEMPTS = 3;
-        let lastError: unknown;
-        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-            const inputs: IRecordingAudioInput[] = [];
-            try {
-                for (const mic of mics) {
-                    const transport = await router.createPlainTransport({
-                        listenInfo: { protocol: 'udp', ip: '127.0.0.1' },
-                        rtcpMux: true,
-                        comedia: false,
-                    });
-                    const destPort = this.allocatePort();
-                    await transport.connect({ ip: '127.0.0.1', port: destPort });
-                    const consumer = await transport.consume({
-                        producerId: mic.producerId,
-                        rtpCapabilities: router.rtpCapabilities,
-                        paused: true,
-                    });
-                    const codec = consumer.rtpParameters.codecs[0];
-                    const sdpPath = path.join(this.sdpScratchDir, `${mic.producerId}-${Date.now()}-${attempt}.sdp`);
-                    await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, 'audio'));
-                    inputs.push({ producerId: mic.producerId, peerId: mic.peerId, transport, consumer, destPort, sdpPath });
-                }
-
-                const args = ['-n'];
-                for (const input of inputs) {
-                    // Same rationale as the video path: wall-clock timestamps instead of trusting
-                    // the RTP stream's raw clock avoids ffmpeg mis-deriving a bogus duration for
-                    // the mixed track, which matters even more here with multiple inputs feeding amix.
-                    args.push('-use_wallclock_as_timestamps', '1', '-protocol_whitelist', 'file,udp,rtp', '-i', input.sdpPath);
-                }
-                args.push(
-                    '-filter_complex',
-                    `amix=inputs=${inputs.length}:duration=longest:dropout_transition=0`,
-                    '-c:a',
-                    'aac',
-                    '-b:a',
-                    '128k',
-                    // Audio has no keyframe concept, and this track's duration is
-                    // unpredictable (an amix restart can be very short-lived) — fragment
-                    // after literally every AAC frame (~21ms) rather than on a timer, so
-                    // even a mic that's on for under a second still flushes something
-                    // valid rather than producing an empty/unremuxable temp file.
-                    '-movflags',
-                    '+frag_every_frame+empty_moov+faststart',
-                    this.tempRecordingPath(outputPath),
-                );
-                const ffmpeg = await this.spawnFfmpegAndWaitReady(args, `audio-mix ${state.roomName} attempt=${attempt}`);
-
-                for (const input of inputs) {
-                    await input.consumer.resume();
-                }
-
-                const dbId = randomUUID();
-                const startedAt = new Date();
-                const created = await this.prisma.recording
-                    .create({
-                        data: {
-                            id: dbId,
-                            room: { connectOrCreate: { where: { name: state.roomName }, create: { name: state.roomName } } },
-                            session: { connect: { id: state.sessionDbId } },
-                            displayName: 'mixed-audio',
-                            streamType: 'audio',
-                            streamNumber,
-                            filename: path.basename(outputPath),
-                            startedAt,
-                        },
-                    })
-                    .catch((error: unknown) => {
-                        this.logger.error(`Failed to persist audio-mix recording metadata for room ${state.roomName}: ${error}`);
-                        return null;
-                    });
-                // Mirrors startVideoSession's notification — a mic-set change mid-session
-                // (restartAudioMix finalizing the old row and calling back into startAudioMix)
-                // also needs to tell a live viewer a new row now exists.
-                if (created) {
-                    this.events.emit('recording-added', {
-                        sessionId: state.sessionDbId,
-                        recordingId: dbId,
-                        filename: path.basename(outputPath),
-                        streamType: 'audio',
-                        displayName: 'mixed-audio',
-                        startedAt: startedAt.toISOString(),
-                    });
-                }
-
-                state.audioMix = { inputs, outputPath, ffmpeg, dbId };
-                return;
-            } catch (error) {
-                lastError = error;
-                for (const input of inputs) {
-                    input.consumer.close();
-                    input.transport.close();
-                    this.releasePort(input.destPort);
-                    void fs.unlink(input.sdpPath).catch(() => undefined);
-                }
-                this.logger.warn(
-                    `Audio-mix start attempt ${attempt}/${MAX_ATTEMPTS} failed for room ${state.roomName}: ${error instanceof Error ? error.message : error}`,
-                );
-            }
-        }
-        throw lastError instanceof Error ? lastError : new Error(String(lastError));
-    }
-
-    private async restartAudioMix(
-        state: IRoomRecordingState,
-        router: mediasoupTypes.Router,
-        mics: IRecordingProducerInfo[],
-    ): Promise<void> {
-        const old = state.audioMix;
-        state.audioMix = null;
-        if (old) {
-            await this.finalizeAudioMix(state, old);
-        }
-        await this.startAudioMix(state, router, mics);
-    }
-
-    private async finalizeAudioMix(state: IRoomRecordingState, mix: IRecordingAudioMixSession): Promise<void> {
-        await this.stopFfmpegGracefully(mix.ffmpeg);
-        for (const input of mix.inputs) {
-            input.consumer.close();
-            input.transport.close();
-            this.releasePort(input.destPort);
-            void fs.unlink(input.sdpPath).catch(() => undefined);
-        }
-        const hasContent = await this.remuxToFinalFile(this.tempRecordingPath(mix.outputPath), mix.outputPath);
-
-        // Same decoupling as finalizeVideoSession — locally available now, GCS upload is separate.
-        // No thumbnail for audio: streamType 'audio' has no thumbnail concept.
-        const stoppedAt = new Date();
-        await this.prisma.recording
-            .update({ where: { id: mix.dbId }, data: { stoppedAt, hasContent } })
-            .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for audio-mix recording ${mix.dbId}: ${error}`));
-        this.events.emit('recording-ready', {
-            sessionId: state.sessionDbId,
-            recordingId: mix.dbId,
-            url: hasContent ? this.buildLocalFileUrl(path.basename(mix.outputPath)) : null,
-            stoppedAt: stoppedAt.toISOString(),
-            hasContent,
-        });
-
-        if (hasContent) {
-            void this.uploadAndNotify(state, mix.outputPath, mix.dbId).catch((error: unknown) =>
-                this.logger.error(`Post-finalize GCS upload failed for audio-mix recording ${mix.dbId}: ${error}`),
-            );
-        }
-    }
-
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
-        await Promise.all([
-            ...[...state.videoSessions.values()].map((session) => this.finalizeVideoSession(state, session)),
-            this.withAudioMixLock(state, () => (state.audioMix ? this.finalizeAudioMix(state, state.audioMix) : Promise.resolve())),
-        ]);
+        await Promise.all([...state.videoSessions.values()].map((session) => this.finalizeVideoSession(state, session)));
     }
 
     /**

@@ -219,16 +219,15 @@ export class RoomService implements OnModuleInit {
         peer.producers.set(producer.id, { producer, source });
         if (source === 'mic') {
             await this.audioLevelObserversByRoom.get(peer.roomName)?.addProducer({ producerId: producer.id });
-            this.recordingService.notifyMicProducersChanged(peer.roomName, peer.router, this.getActiveMicProducers(peer.roomName));
-        } else {
-            this.recordingService.notifyProducerCreated(peer.roomName, peer.router, {
-                producerId: producer.id,
-                peerId: peer.peerId,
-                userId: peer.userId,
-                displayName: peer.displayName,
-                source,
-            });
         }
+        // Every producer — webcam, screen, or mic — gets its own independent recording session.
+        this.recordingService.notifyProducerCreated(peer.roomName, peer.router, {
+            producerId: producer.id,
+            peerId: peer.peerId,
+            userId: peer.userId,
+            displayName: peer.displayName,
+            source,
+        });
         return {
             producerId: producer.id,
             peerId: peer.peerId,
@@ -304,11 +303,8 @@ export class RoomService implements OnModuleInit {
             return null;
         }
         peer.producers.delete(producerId);
-        if (record.source === 'mic') {
-            this.recordingService.notifyMicProducersChanged(peer.roomName, peer.router, this.getActiveMicProducers(peer.roomName));
-        } else {
-            this.recordingService.notifyProducerClosing(peer.roomName, producerId);
-        }
+        // Every producer — webcam, screen, or mic — has its own independent recording session.
+        this.recordingService.notifyProducerClosing(peer.roomName, producerId);
         record.producer.close();
         return { roomName: peer.roomName };
     }
@@ -320,16 +316,9 @@ export class RoomService implements OnModuleInit {
             return null;
         }
         const removedProducerIds = [...peer.producers.keys()];
-        const hadMic = [...peer.producers.values()].some((record) => record.source === 'mic');
-        const videoProducerIds = [...peer.producers.values()]
-            .filter((record) => record.source !== 'mic')
-            .map((record) => record.producer.id);
         this.peers.delete(peerId);
-        for (const producerId of videoProducerIds) {
+        for (const producerId of removedProducerIds) {
             this.recordingService.notifyProducerClosing(peer.roomName, producerId);
-        }
-        if (hadMic) {
-            this.recordingService.notifyMicProducersChanged(peer.roomName, peer.router, this.getActiveMicProducers(peer.roomName));
         }
         if (![...this.peers.values()].some((p) => p.roomName === peer.roomName)) {
             void this.recordingService.stop(peer.roomName);
@@ -355,21 +344,6 @@ export class RoomService implements OnModuleInit {
             }
         }
         return { router, producers };
-    }
-
-    private getActiveMicProducers(roomName: string): IRecordingProducerInfo[] {
-        const result: IRecordingProducerInfo[] = [];
-        for (const peer of this.peers.values()) {
-            if (peer.roomName !== roomName) {
-                continue;
-            }
-            for (const { producer, source } of peer.producers.values()) {
-                if (source === 'mic') {
-                    result.push({ producerId: producer.id, peerId: peer.peerId, userId: peer.userId, displayName: peer.displayName, source });
-                }
-            }
-        }
-        return result;
     }
 
     private findProducerOwner(producerId: string): { peerId: string; displayName: string; source: StreamSource } | null {
