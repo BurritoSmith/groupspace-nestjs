@@ -72,6 +72,10 @@ export interface IRecordingSummary {
      *  frontend uses this to align every stream on one shared timeline rather than assuming they
      *  all started together. */
     startedAt: string;
+    /** When this specific stream stopped, or null while still recording — paired with startedAt
+     *  so the frontend can compute each recording's actual duration from our own bookkeeping
+     *  instead of trusting the browser's <video>.duration. */
+    stoppedAt: string | null;
 }
 
 export interface IRecordingSessionDetail extends IRecordingSessionSummary {

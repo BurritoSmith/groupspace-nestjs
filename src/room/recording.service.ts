@@ -115,7 +115,12 @@ export class RecordingService {
                     // Lets the frontend align streams on one shared timeline even when they
                     // started at genuinely different real-world moments (e.g. a screen share
                     // that began well after the session's webcam stream) — see PlaybackSync.
+                    // stoppedAt lets it compute each recording's actual duration directly from
+                    // our own bookkeeping, rather than trusting the browser's <video>.duration
+                    // (which can be Infinity/wrong immediately after loadedmetadata and only
+                    // self-correct later via a separate durationchange event).
                     startedAt: recording.startedAt.toISOString(),
+                    stoppedAt: recording.stoppedAt?.toISOString() ?? null,
                 };
             }),
         );
