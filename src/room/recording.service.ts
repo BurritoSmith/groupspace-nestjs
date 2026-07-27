@@ -228,6 +228,7 @@ export class RecordingService {
             sessionName: defaultSessionName,
             videoSessions: new Map(),
             streamNumberCounters: new Map(),
+            pendingFinalizations: new Set(),
         };
         // Set before awaiting so a concurrent start-recording call for the same room fails fast.
         this.rooms.set(roomName, state);
@@ -281,7 +282,10 @@ export class RecordingService {
         );
     }
 
-    /** Fire-and-forget hook for a closing producer — webcam, screen, or mic. No-op if there's no recording session for it. */
+    /** Fire-and-forget hook for a closing producer — webcam, screen, or mic. No-op if there's no
+     *  recording session for it. Registers the finalization in state.pendingFinalizations so a
+     *  concurrent stop() (e.g. "stop all streams" closing several producers immediately before
+     *  stopping the recording) waits for it instead of racing ahead — see that field's comment. */
     notifyProducerClosing(roomName: string, producerId: string): void {
         const state = this.rooms.get(roomName);
         const session = state?.videoSessions.get(producerId);
@@ -289,9 +293,11 @@ export class RecordingService {
             return;
         }
         state.videoSessions.delete(producerId);
-        void this.finalizeVideoSession(state, session).catch((error: unknown) =>
+        const finalizing = this.finalizeVideoSession(state, session).catch((error: unknown) =>
             this.logger.error(`Error finalizing recording for producer ${producerId}: ${error}`),
         );
+        state.pendingFinalizations.add(finalizing);
+        void finalizing.finally(() => state.pendingFinalizations.delete(finalizing));
     }
 
     private async startVideoSession(
@@ -528,7 +534,13 @@ export class RecordingService {
     }
 
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
-        await Promise.all([...state.videoSessions.values()].map((session) => this.finalizeVideoSession(state, session)));
+        // Finalizes whatever's still open, AND waits for anything already finalizing in the
+        // background from an earlier individual stream stop (see pendingFinalizations) — both
+        // run concurrently, not sequentially, matching the original Promise.all semantics.
+        await Promise.all([
+            ...[...state.videoSessions.values()].map((session) => this.finalizeVideoSession(state, session)),
+            ...state.pendingFinalizations,
+        ]);
     }
 
     /**

@@ -99,4 +99,11 @@ export interface IRoomRecordingState {
     // multiple simultaneous screen-shares (or successive mic on/off cycles) within one recording
     // session — reset each time a fresh start() creates new state.
     streamNumberCounters: Map<string, number>;
+    // Finalizations already kicked off fire-and-forget by notifyProducerClosing (an individual
+    // stream stopping on its own, ahead of the whole recording stopping) that haven't settled
+    // yet. teardownRoom() must wait for these too, not just whatever's still in videoSessions at
+    // the moment it runs — a producer closed moments earlier is already removed from
+    // videoSessions (see notifyProducerClosing), so without this its still-in-flight ffmpeg
+    // stop/remux could lose the race against the recording session being marked stopped.
+    pendingFinalizations: Set<Promise<void>>;
 }
