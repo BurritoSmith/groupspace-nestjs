@@ -1,13 +1,41 @@
 import { Module } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
 import { ChatService } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
 import { RecordingService } from './recording.service';
 import { RoomGateway } from './room.gateway';
 import { RoomService } from './room.service';
+import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
 import { UsersService } from './users.service';
 
 @Module({
-    providers: [RoomGateway, RoomService, TurnCredentialsService, GoogleAuthService, RecordingService, UsersService, ChatService],
+    imports: [
+        // registerAsync's factory defers reading process.env until actual instantiation
+        // (after dotenv has definitely loaded), rather than register()'s eager read at
+        // module-decorator-evaluation time, which could race ahead of main.ts's env loading.
+        // Throws rather than degrading gracefully (unlike e.g. TURN_SECRET, which is genuinely
+        // optional) — signing session tokens with an undefined secret would silently produce
+        // forgeable credentials instead of a clean startup failure.
+        JwtModule.registerAsync({
+            useFactory: () => {
+                const secret = process.env.SESSION_JWT_SECRET;
+                if (!secret) {
+                    throw new Error('SESSION_JWT_SECRET must be set — refusing to start with session tokens unsigned/forgeable.');
+                }
+                return { secret, signOptions: { expiresIn: '30d' } };
+            },
+        }),
+    ],
+    providers: [
+        RoomGateway,
+        RoomService,
+        TurnCredentialsService,
+        GoogleAuthService,
+        RecordingService,
+        UsersService,
+        ChatService,
+        SessionService,
+    ],
 })
 export class RoomModule {}
