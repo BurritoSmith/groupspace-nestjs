@@ -206,7 +206,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         socket.data.roomName = roomName;
         socket.data.displayName = displayName;
         socket.data.userId = userId;
-        socket.to(roomName).emit('peer-joined', { peerId: socket.id, displayName, pictureUrl });
+        socket.to(roomName).emit('peer-joined', { peerId: socket.id, displayName, pictureUrl, micSelfMuted: false });
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
         return {
@@ -378,6 +378,18 @@ export class RoomGateway implements OnGatewayDisconnect {
             return;
         }
         socket.to(roomName).emit('user-stopped-typing', { peerId: socket.id });
+    }
+
+    /** Client-side "still producing, but silenced" mute — see IPeerState.micSelfMuted for why
+     *  this needs real server-side state (a late joiner's join-room ack must reflect it),
+     *  unlike the fully ephemeral typing-indicator broadcasts above. */
+    @SubscribeMessage('mic-mute-changed')
+    onMicMuteChanged(@ConnectedSocket() socket: Socket, @MessageBody() payload: { muted: boolean }) {
+        const result = this.roomService.setMicSelfMuted(socket.id, payload.muted);
+        if (!result) {
+            return;
+        }
+        socket.to(result.roomName).emit('mic-mute-changed', { peerId: socket.id, muted: payload.muted });
     }
 
     @SubscribeMessage('load-earlier-chat-messages')

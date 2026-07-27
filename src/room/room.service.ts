@@ -132,7 +132,7 @@ export class RoomService implements OnModuleInit {
             if (peer.roomName !== roomName) {
                 continue;
             }
-            peers.push({ peerId: peer.peerId, displayName: peer.displayName, pictureUrl: peer.pictureUrl });
+            peers.push({ peerId: peer.peerId, displayName: peer.displayName, pictureUrl: peer.pictureUrl, micSelfMuted: peer.micSelfMuted });
             for (const { producer, source } of peer.producers.values()) {
                 existingProducers.push({
                     producerId: producer.id,
@@ -149,6 +149,7 @@ export class RoomService implements OnModuleInit {
             userId,
             displayName,
             pictureUrl,
+            micSelfMuted: false,
             roomName,
             router,
             sendTransport: null,
@@ -163,6 +164,18 @@ export class RoomService implements OnModuleInit {
             peers,
             existingProducers,
         };
+    }
+
+    /** Records a peer's client-side "still producing, but silenced" mute state, purely so a late
+     *  joiner's join-room ack can reflect it — see IPeerState.micSelfMuted. Returns the peer's
+     *  roomName (for the gateway to broadcast to) or null if the peer isn't known. */
+    setMicSelfMuted(peerId: string, muted: boolean): { roomName: string } | null {
+        const peer = this.peers.get(peerId);
+        if (!peer) {
+            return null;
+        }
+        peer.micSelfMuted = muted;
+        return { roomName: peer.roomName };
     }
 
     async createTransport(peerId: string, direction: 'send' | 'recv') {

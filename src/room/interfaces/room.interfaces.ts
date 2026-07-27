@@ -15,6 +15,7 @@ export interface IPeerSummary {
     peerId: string;
     displayName: string;
     pictureUrl: string;
+    micSelfMuted: boolean;
 }
 
 export interface IProducerSummary {
@@ -105,6 +106,10 @@ export interface IPeerState {
     userId: string;
     displayName: string;
     pictureUrl: string;
+    // Client-side "keep the mic producer alive but silence the track" mute (MediaStreamTrack.enabled
+    // = false) — invisible to the server otherwise, so this flag exists purely to let a late joiner's
+    // join-room ack reflect the current state of everyone already in the room. See setMicSelfMuted.
+    micSelfMuted: boolean;
     roomName: string;
     router: mediasoupTypes.Router;
     sendTransport: mediasoupTypes.WebRtcTransport | null;
