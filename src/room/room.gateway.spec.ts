@@ -81,4 +81,26 @@ describe('RoomGateway', () => {
             expect(toSpy).not.toHaveBeenCalled();
         });
     });
+
+    describe('normalizeRoomName', () => {
+        const call = (raw: string | undefined) =>
+            (gateway as unknown as { normalizeRoomName: (raw: string | undefined) => string }).normalizeRoomName(raw);
+
+        it('lowercases mixed-case input', () => {
+            expect(call('MyRoom')).toBe('myroom');
+        });
+
+        it('trims surrounding whitespace', () => {
+            expect(call('  myroom  ')).toBe('myroom');
+        });
+
+        it('throws for undefined input', () => {
+            expect(() => call(undefined)).toThrow('A room name is required.');
+        });
+
+        it('throws for empty/whitespace-only input', () => {
+            expect(() => call('')).toThrow('A room name is required.');
+            expect(() => call('   ')).toThrow('A room name is required.');
+        });
+    });
 });
