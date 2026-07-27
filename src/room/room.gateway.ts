@@ -115,6 +115,8 @@ export class RoomGateway implements OnGatewayDisconnect {
                 filename,
                 streamType,
                 displayName,
+                userId,
+                pictureUrl,
                 startedAt,
             }: {
                 sessionId: string;
@@ -122,11 +124,13 @@ export class RoomGateway implements OnGatewayDisconnect {
                 filename: string;
                 streamType: string;
                 displayName: string;
+                userId: string | null;
+                pictureUrl: string | null;
                 startedAt: string;
             }) => {
                 this.server
                     .to(`recording-session:${sessionId}`)
-                    .emit('recording-added', { recordingId, filename, streamType, displayName, startedAt });
+                    .emit('recording-added', { recordingId, filename, streamType, displayName, userId, pictureUrl, startedAt });
             },
         );
     }

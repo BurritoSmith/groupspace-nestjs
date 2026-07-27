@@ -131,7 +131,7 @@ describe('RecordingService', () => {
             expect(first).not.toBe(second);
         });
 
-        it('omits the peerId segment entirely when none is given (the mixed-audio track, which has no single owning peer)', () => {
+        it('omits the peerId segment entirely when none is given', () => {
             const buildFilename = (service as unknown as { buildFilename: BuildFilename }).buildFilename.bind(service);
             const result = buildFilename('lobby', 'mixed-audio', 'audio', 1, '20260727T074320');
             expect(result).toBe('lobby-mixed-audio-20260727T074320-audio-1.mp4');
@@ -144,6 +144,31 @@ describe('RecordingService', () => {
                 service as unknown as { remuxToFinalFile: (tempPath: string, finalPath: string) => Promise<boolean> }
             ).remuxToFinalFile('/nonexistent/path/does-not-exist.recording.mp4', '/nonexistent/path/does-not-exist.mp4');
             expect(result).toBe(false);
+        });
+    });
+
+    describe('buildRecordingFfmpegArgs', () => {
+        type BuildArgs = (isAudio: boolean, sdpPath: string, tempOutputPath: string) => string[];
+
+        it('chooses the AAC audio codec (no video codec) when recording a mic producer', () => {
+            const buildArgs = (service as unknown as { buildRecordingFfmpegArgs: BuildArgs }).buildRecordingFfmpegArgs.bind(service);
+            const args = buildArgs(true, '/tmp/a.sdp', '/recordings/a.recording.mp4');
+            expect(args).toContain('-c:a');
+            expect(args).toContain('aac');
+            expect(args).not.toContain('-c:v');
+            expect(args).not.toContain('libx264');
+            // Audio has no keyframe concept — fragments every frame instead.
+            expect(args).toContain('+frag_every_frame+empty_moov+faststart');
+        });
+
+        it('chooses the H.264 video codec (no audio codec) when recording a webcam/screen producer', () => {
+            const buildArgs = (service as unknown as { buildRecordingFfmpegArgs: BuildArgs }).buildRecordingFfmpegArgs.bind(service);
+            const args = buildArgs(false, '/tmp/a.sdp', '/recordings/a.recording.mp4');
+            expect(args).toContain('-c:v');
+            expect(args).toContain('libx264');
+            expect(args).not.toContain('-c:a');
+            expect(args).not.toContain('aac');
+            expect(args).toContain('+frag_keyframe+empty_moov+faststart');
         });
     });
 });
