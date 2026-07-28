@@ -75,9 +75,16 @@ jobs:
 
       - name: Health check
         run: |
-          status=$(curl -s -o /dev/null -w "%{http_code}" "$BACKEND_URL")
-          echo "HTTP status: $status"
-          if [ "$status" != "200" ]; then
-            echo "Health check failed"
-            exit 1
-          fi
+          # The app container reports "Up" the instant it starts, well before Nest finishes
+          # bootstrapping (Prisma connect, mediasoup worker init, etc.) — retry instead of
+          # checking once immediately.
+          for attempt in $(seq 1 10); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$BACKEND_URL")
+            echo "Attempt $attempt: HTTP status $status"
+            if [ "$status" = "200" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Health check failed"
+          exit 1
