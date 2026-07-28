@@ -12,7 +12,9 @@ describe('RoomService', () => {
     let service: RoomService;
 
     beforeEach(() => {
-        service = new RoomService({} as never); // RecordingService — untouched by the methods under test
+        // isRecording() is the only RecordingService method joinRoom() itself calls; every other
+        // test in this file exercises methods that never touch RecordingService at all.
+        service = new RoomService({ isRecording: jest.fn().mockReturnValue(false) } as never);
     });
 
     describe('setMicSelfMuted', () => {
@@ -205,6 +207,30 @@ describe('RoomService', () => {
             const result = await service.joinRoom('peer-2', 'lobby', 'user-2', 'Burr', 'https://pic-2');
 
             expect(result.peers).toEqual([{ peerId: 'peer-1', userId: 'user-1', displayName: 'Clay', pictureUrl: 'https://pic-1', micSelfMuted: false }]);
+        });
+
+        // Regression coverage: a client joining after recording has already started must see
+        // isRecording: true immediately in the join result, not just via a 'recording-state'
+        // broadcast it could never have received — see IJoinRoomResult.isRecording's comment.
+        it('reports isRecording: true when RecordingService says the room is currently recording', async () => {
+            const fakeRecordingService = { isRecording: jest.fn().mockReturnValue(true) };
+            const target = new RoomService(fakeRecordingService as never);
+            seedRouter(target, 'lobby');
+
+            const result = await target.joinRoom('peer-1', 'lobby', 'user-1', 'Clay', 'https://pic');
+
+            expect(result.isRecording).toBe(true);
+            expect(fakeRecordingService.isRecording).toHaveBeenCalledWith('lobby');
+        });
+
+        it('reports isRecording: false when the room is not being recorded', async () => {
+            const fakeRecordingService = { isRecording: jest.fn().mockReturnValue(false) };
+            const target = new RoomService(fakeRecordingService as never);
+            seedRouter(target, 'lobby');
+
+            const result = await target.joinRoom('peer-1', 'lobby', 'user-1', 'Clay', 'https://pic');
+
+            expect(result.isRecording).toBe(false);
         });
     });
 });

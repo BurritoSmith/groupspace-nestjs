@@ -45,6 +45,12 @@ export interface IJoinRoomResult {
     chatHistory: IChatMessage[];
     hasMoreChatHistory: boolean;
     iceServers: ITurnCredentials[];
+    // Whether the room is currently being recorded — included directly here (rather than relying
+    // solely on the 'recording-state' broadcast) so a client joining after recording has already
+    // started reflects reality immediately instead of defaulting to "not recording" until/unless
+    // a broadcast it could never have received happens to arrive. Mirrors how micSelfMuted is
+    // included per-peer for the same reason.
+    isRecording: boolean;
 }
 
 export interface ICreateTransportPayload {
