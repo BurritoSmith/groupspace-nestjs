@@ -188,6 +188,7 @@ describe('RecordingService', () => {
                 videoSessions: new Map([['producer-1', {} as IRecordingVideoSession]]),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
+                startQueue: Promise.resolve(),
             };
         }
 
@@ -241,6 +242,75 @@ describe('RecordingService', () => {
             await (service as unknown as { teardownRoom: (state: IRoomRecordingState) => Promise<void> }).teardownRoom(state);
 
             expect(finalized).toBe(true); // teardownRoom() genuinely waited for it, not a no-op
+        });
+    });
+
+    describe('enqueueStart — throttling concurrent recording starts within a room', () => {
+        // Regression test for the "hunch"/"hunchimus prime" incident: several producers (a
+        // user's webcam+screen+mic, or several users' streams) starting within the same few
+        // seconds spawned that many CPU-heavy ffmpeg encoders at once, starving one or more of
+        // them badly enough that they never wrote a usable frame. enqueueStart() serializes
+        // starts per room with a settle pause between them instead.
+        function buildState(): IRoomRecordingState {
+            return {
+                roomName: 'room1',
+                sessionDbId: 'session-1',
+                sessionName: 'Test Session',
+                videoSessions: new Map(),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+                startQueue: Promise.resolve(),
+            };
+        }
+
+        type EnqueueStart = (state: IRoomRecordingState, run: () => Promise<void>) => Promise<void>;
+        const enqueueStart = (state: IRoomRecordingState, run: () => Promise<void>) =>
+            (service as unknown as { enqueueStart: EnqueueStart }).enqueueStart.call(service, state, run);
+
+        afterEach(() => {
+            jest.useRealTimers();
+        });
+
+        it('does not begin the second queued start until the first has settled plus the stagger delay', async () => {
+            jest.useFakeTimers();
+            const state = buildState();
+            const order: string[] = [];
+
+            const first = enqueueStart(state, async () => {
+                order.push('first-start');
+            });
+            const second = enqueueStart(state, async () => {
+                order.push('second-start');
+            });
+
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(order).toEqual(['first-start']); // second is still waiting on the stagger delay
+
+            await jest.advanceTimersByTimeAsync(2000);
+            expect(order).toEqual(['first-start', 'second-start']);
+
+            await Promise.all([first, second]);
+        });
+
+        it("a rejected start doesn't jam the queue for the next one", async () => {
+            jest.useFakeTimers();
+            const state = buildState();
+            const order: string[] = [];
+
+            const first = enqueueStart(state, async () => {
+                throw new Error('boom');
+            });
+            first.catch(() => undefined); // observed below via expect().rejects — prevents an unhandled-rejection warning in the meantime
+            const second = enqueueStart(state, async () => {
+                order.push('second-start');
+            });
+
+            await jest.advanceTimersByTimeAsync(2000);
+
+            expect(order).toEqual(['second-start']);
+            await expect(first).rejects.toThrow('boom');
+            await second;
         });
     });
 });

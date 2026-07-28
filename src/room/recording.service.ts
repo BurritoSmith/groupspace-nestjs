@@ -229,14 +229,18 @@ export class RecordingService {
             videoSessions: new Map(),
             streamNumberCounters: new Map(),
             pendingFinalizations: new Set(),
+            startQueue: Promise.resolve(),
         };
         // Set before awaiting so a concurrent start-recording call for the same room fails fast.
         this.rooms.set(roomName, state);
 
         try {
-            // webcam, screen, AND mic all go through the same per-producer session now.
+            // webcam, screen, AND mic all go through the same per-producer session now. Routed
+            // through enqueueStart() (not called directly) so starts are staggered the same way
+            // as notifyProducerCreated()'s — several producers already existing when recording is
+            // turned on is exactly the scenario that starved encoders in the "hunch" incident.
             for (const producer of snapshot.producers) {
-                await this.startVideoSession(state, snapshot.router, producer);
+                await this.enqueueStart(state, () => this.startVideoSession(state, snapshot.router, producer));
             }
         } catch (error) {
             this.rooms.delete(roomName);
@@ -277,9 +281,33 @@ export class RecordingService {
         if (!state) {
             return;
         }
-        void this.startVideoSession(state, router, producer).catch((error: unknown) =>
+        void this.enqueueStart(state, () => this.startVideoSession(state, router, producer)).catch((error: unknown) =>
             this.logger.error(`Failed to start recording ${producer.source} producer ${producer.producerId} in room ${roomName}: ${error}`),
         );
+    }
+
+    // Pause held after one queued start settles, before the next one begins — gives that
+    // encoder's initial CPU spike (keyframe + encoder warm-up) a moment to pass rather than
+    // piling straight into the next spawn. Not a scientific number, just comfortably longer than
+    // the ~300ms spawnFfmpegAndWaitReady() readiness window this queue sits on top of.
+    private static readonly START_STAGGER_MS = 2000;
+
+    /** Serializes `run` (a startVideoSession() call) onto the room's per-room FIFO chain, so
+     *  concurrent producer starts — several already-active producers when recording is turned on
+     *  (start()), or several new producers negotiating close together while already recording
+     *  (notifyProducerCreated()) — spawn their ffmpeg encoders one at a time with a settle pause
+     *  between them, instead of all piling onto the CPU in the same instant. One start's
+     *  rejection is captured here and does not propagate into the chain, so it can never jam
+     *  subsequent queued starts; the caller still observes the rejection via the returned promise. */
+    private enqueueStart(state: IRoomRecordingState, run: () => Promise<void>): Promise<void> {
+        // state.startQueue never itself rejects (see the .catch(() => undefined) below), so
+        // chaining with .then(run) alone is safe — run() only ever begins once its predecessor,
+        // success or failure, has fully settled (including its stagger pause).
+        const settled = state.startQueue.then(run);
+        state.startQueue = settled
+            .catch(() => undefined)
+            .then(() => new Promise<void>((resolve) => setTimeout(resolve, RecordingService.START_STAGGER_MS)));
+        return settled;
     }
 
     /** Fire-and-forget hook for a closing producer — webcam, screen, or mic. No-op if there's no
@@ -443,8 +471,16 @@ export class RecordingService {
             : [
                   '-c:v',
                   'libx264',
+                  // ultrafast, not veryfast — every additional simultaneous video recording
+                  // (webcam/screen, each its own real-time libx264 encode) meaningfully adds to
+                  // total CPU demand; a session with several concurrent video streams starting
+                  // together can starve one or more of them badly enough that they never
+                  // encode a single usable frame (confirmed via a real incident: RTP packets
+                  // piling up "max delay reached"/"missed N packets" until the temp file was
+                  // still completely empty when the stream stopped). ultrafast trades some
+                  // compression efficiency for meaningfully lower CPU per encode.
                   '-preset',
-                  'veryfast',
+                  'ultrafast',
                   // Disables B-frames/lookahead buffering — without this, x264 can hold several
                   // frames internally before any encoded output is available to write at all,
                   // regardless of forced keyframe timing. A stream stopped within that first
@@ -722,10 +758,14 @@ export class RecordingService {
         return finalPath.replace(/\.mp4$/, '.recording.mp4');
     }
 
-    /** Runs ffmpeg on a finite local-file input to completion (unlike spawnFfmpegAndWaitReady, which is for live RTP input and never awaits full completion). */
+    /** Runs ffmpeg on a finite local-file input to completion (unlike spawnFfmpegAndWaitReady, which is for live RTP input and never awaits full completion).
+     *  Always deprioritized (see deprioritize()) — remux/thumbnail generation operate on
+     *  already-recorded files and can simply take a bit longer under CPU contention with zero
+     *  data-loss risk, unlike a live recording process consuming real-time, unbufferable RTP. */
     private runFfmpegToCompletion(args: string[], logLabel: string): Promise<void> {
         return new Promise((resolve, reject) => {
             const ffmpeg = spawn(this.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+            this.deprioritize(ffmpeg, logLabel);
             let settled = false;
             ffmpeg.once('error', (error) => {
                 if (!settled) {
@@ -746,6 +786,24 @@ export class RecordingService {
                 }
             });
         });
+    }
+
+    /** Lowers OS scheduling priority (nice) for a non-time-critical ffmpeg process, so it yields
+     *  CPU to any concurrently-running LIVE recording process under contention — those consume
+     *  real-time, unbufferable RTP and permanently lose data if starved even briefly (confirmed
+     *  via a real incident: several video streams starting together starved each other badly
+     *  enough that some never wrote a single frame). Raising niceness (unlike lowering it) needs
+     *  no special privileges, but this is still best-effort/non-fatal — a container/OS that
+     *  doesn't permit it shouldn't break recording over a scheduling nicety. */
+    private deprioritize(proc: ChildProcess, logLabel: string): void {
+        if (!proc.pid) {
+            return;
+        }
+        try {
+            os.setPriority(proc.pid, 19); // lowest niceness available without elevated privileges
+        } catch (error) {
+            this.logger.debug(`Could not lower priority for ffmpeg (${logLabel}): ${error instanceof Error ? error.message : error}`);
+        }
     }
 
     private stopFfmpegGracefully(proc: ChildProcess, timeoutMs = 5000): Promise<void> {
