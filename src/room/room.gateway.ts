@@ -206,7 +206,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         socket.data.roomName = roomName;
         socket.data.displayName = displayName;
         socket.data.userId = userId;
-        socket.to(roomName).emit('peer-joined', { peerId: socket.id, displayName, pictureUrl, micSelfMuted: false });
+        socket.to(roomName).emit('peer-joined', { peerId: socket.id, userId, displayName, pictureUrl, micSelfMuted: false });
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
         return {

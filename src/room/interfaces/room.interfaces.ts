@@ -13,6 +13,7 @@ export interface IChatMessage {
 
 export interface IPeerSummary {
     peerId: string;
+    userId: string;
     displayName: string;
     pictureUrl: string;
     micSelfMuted: boolean;

@@ -132,7 +132,13 @@ export class RoomService implements OnModuleInit {
             if (peer.roomName !== roomName) {
                 continue;
             }
-            peers.push({ peerId: peer.peerId, displayName: peer.displayName, pictureUrl: peer.pictureUrl, micSelfMuted: peer.micSelfMuted });
+            peers.push({
+                peerId: peer.peerId,
+                userId: peer.userId,
+                displayName: peer.displayName,
+                pictureUrl: peer.pictureUrl,
+                micSelfMuted: peer.micSelfMuted,
+            });
             for (const { producer, source } of peer.producers.values()) {
                 existingProducers.push({
                     producerId: producer.id,

@@ -1,6 +1,13 @@
 import { RoomService } from './room.service';
 import { IPeerState } from './interfaces/room.interfaces';
 
+function seedRouter(target: RoomService, roomName: string): void {
+    // getOrCreateRouter() returns whatever's already in routersByRoom before touching the
+    // mediasoup worker, so pre-seeding it here lets joinRoom() be tested without a real worker.
+    const routersByRoom = (target as unknown as { routersByRoom: Map<string, unknown> }).routersByRoom;
+    routersByRoom.set(roomName, { rtpCapabilities: {} });
+}
+
 describe('RoomService', () => {
     let service: RoomService;
 
@@ -50,6 +57,20 @@ describe('RoomService', () => {
             const result = service.setMicSelfMuted('nonexistent-peer', true);
 
             expect(result).toBeNull();
+        });
+    });
+
+    describe('joinRoom', () => {
+        // Regression coverage: chat messages carry userId but not peerId/pictureUrl, and the
+        // roster (peers) carried peerId/pictureUrl but not userId — no join key between them for
+        // the frontend to look up a message sender's avatar. userId closes that gap.
+        it("includes each existing peer's userId in the returned roster", async () => {
+            seedRouter(service, 'lobby');
+            await service.joinRoom('peer-1', 'lobby', 'user-1', 'Clay', 'https://pic-1');
+
+            const result = await service.joinRoom('peer-2', 'lobby', 'user-2', 'Burr', 'https://pic-2');
+
+            expect(result.peers).toEqual([{ peerId: 'peer-1', userId: 'user-1', displayName: 'Clay', pictureUrl: 'https://pic-1', micSelfMuted: false }]);
         });
     });
 });
