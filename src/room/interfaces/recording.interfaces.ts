@@ -106,4 +106,10 @@ export interface IRoomRecordingState {
     // videoSessions (see notifyProducerClosing), so without this its still-in-flight ffmpeg
     // stop/remux could lose the race against the recording session being marked stopped.
     pendingFinalizations: Set<Promise<void>>;
+    // Serializes startVideoSession() calls for this room so concurrent producer starts (e.g. a
+    // user's webcam+screen+mic all negotiating at once, or several users starting near-simultaneously)
+    // don't all spawn CPU-heavy ffmpeg encoders in the same instant — see RecordingService.enqueueStart().
+    // A promise chain, not a counter/lock, so callers just await their own link and one start's
+    // rejection can't jam the queue for the rest.
+    startQueue: Promise<void>;
 }
