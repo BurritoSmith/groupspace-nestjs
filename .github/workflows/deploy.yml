@@ -1,0 +1,77 @@
+name: Deploy (development)
+
+# Manually triggered only — no push/pull_request trigger. Run it from this repo's Actions tab
+# ("Run workflow") or via `gh workflow run deploy.yml`.
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required to mint the OIDC token Workload Identity Federation exchanges for GCP credentials
+  contents: read
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+env:
+  VM_NAME: spaces-vm
+  VM_ZONE: us-central1-a
+  BACKEND_URL: https://35-238-110-160.sslip.io/
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+
+      - run: npm test
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # No node_modules/.git — the VM's own Docker build (see Dockerfile) does its own npm ci
+      # inside the image, and .env/recordings/ on the VM (real secrets, real data) are never part
+      # of this checkout in the first place, so extraction below can't overwrite them.
+      - name: Package the checkout
+        run: tar --exclude=.git --exclude=node_modules -czf /tmp/backend.tar.gz .
+
+      - name: Copy to the VM
+        run: gcloud compute scp /tmp/backend.tar.gz "$VM_NAME:backend.tar.gz" --zone="$VM_ZONE"
+
+      - name: Extract and rebuild the docker compose stack
+        run: |
+          gcloud compute ssh "$VM_NAME" --zone="$VM_ZONE" --command="
+            mkdir -p ~/spaces-backend &&
+            tar -xzf backend.tar.gz -C ~/spaces-backend &&
+            rm -f backend.tar.gz &&
+            cd ~/spaces-backend/deploy &&
+            docker compose up -d --build
+          "
+
+      - name: Show container status
+        run: |
+          gcloud compute ssh "$VM_NAME" --zone="$VM_ZONE" --command="
+            cd ~/spaces-backend/deploy &&
+            docker compose logs app --tail=50 &&
+            docker compose ps
+          "
+
+      - name: Health check
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" "$BACKEND_URL")
+          echo "HTTP status: $status"
+          if [ "$status" != "200" ]; then
+            echo "Health check failed"
+            exit 1
+          fi
