@@ -112,4 +112,10 @@ export interface IRoomRecordingState {
     // A promise chain, not a counter/lock, so callers just await their own link and one start's
     // rejection can't jam the queue for the rest.
     startQueue: Promise<void>;
+    // Same pattern as startQueue, for finalizeVideoSession() calls — stopping a session with
+    // several active streams (or "stop all streams" closing several producers at once) used to
+    // finalize every one of them concurrently via Promise.all, which could pile just as much
+    // simultaneous CPU-heavy ffmpeg work onto stop as an unstaggered start could. See
+    // RecordingService.enqueueStop().
+    stopQueue: Promise<void>;
 }

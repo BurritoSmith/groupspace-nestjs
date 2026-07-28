@@ -230,6 +230,7 @@ export class RecordingService {
             streamNumberCounters: new Map(),
             pendingFinalizations: new Set(),
             startQueue: Promise.resolve(),
+            stopQueue: Promise.resolve(),
         };
         // Set before awaiting so a concurrent start-recording call for the same room fails fast.
         this.rooms.set(roomName, state);
@@ -286,11 +287,13 @@ export class RecordingService {
         );
     }
 
-    // Pause held after one queued start settles, before the next one begins — gives that
-    // encoder's initial CPU spike (keyframe + encoder warm-up) a moment to pass rather than
-    // piling straight into the next spawn. Not a scientific number, just comfortably longer than
-    // the ~300ms spawnFfmpegAndWaitReady() readiness window this queue sits on top of.
-    private static readonly START_STAGGER_MS = 2000;
+    // Pause held after one queued start OR stop settles, before the next one (of the same kind)
+    // begins — gives that encoder's CPU-heavy moment (start: keyframe + encoder warm-up; stop:
+    // flushing buffered frames and finalizing the encode) a moment to pass rather than piling
+    // straight into the next one. Trimmed from an earlier, more conservative 2000ms — this is
+    // still a judgment call, not a measured floor, so nudge it back up if staggered stops start
+    // failing again on the live VM.
+    private static readonly RECORDING_STAGGER_MS = 500;
 
     /** Serializes `run` (a startVideoSession() call) onto the room's per-room FIFO chain, so
      *  concurrent producer starts — several already-active producers when recording is turned on
@@ -306,7 +309,22 @@ export class RecordingService {
         const settled = state.startQueue.then(run);
         state.startQueue = settled
             .catch(() => undefined)
-            .then(() => new Promise<void>((resolve) => setTimeout(resolve, RecordingService.START_STAGGER_MS)));
+            .then(() => new Promise<void>((resolve) => setTimeout(resolve, RecordingService.RECORDING_STAGGER_MS)));
+        return settled;
+    }
+
+    /** Same pattern as enqueueStart(), for finalizeVideoSession() calls — stopping several active
+     *  streams at once (teardownRoom's Promise.all, or several notifyProducerClosing() calls close
+     *  together, e.g. "stop all streams") used to send every ffmpeg process its graceful-quit
+     *  signal in the same instant, which could starve one of them out of the 5s SIGKILL grace
+     *  period just as easily as an unstaggered start could starve a fresh encoder — confirmed live
+     *  (room "afcu", session "Checking": mic and one screen recorded fine, the second screen share
+     *  didn't exit in time, got SIGKILL'd, and its file came out corrupt). */
+    private enqueueStop(state: IRoomRecordingState, run: () => Promise<void>): Promise<void> {
+        const settled = state.stopQueue.then(run);
+        state.stopQueue = settled
+            .catch(() => undefined)
+            .then(() => new Promise<void>((resolve) => setTimeout(resolve, RecordingService.RECORDING_STAGGER_MS)));
         return settled;
     }
 
@@ -321,7 +339,7 @@ export class RecordingService {
             return;
         }
         state.videoSessions.delete(producerId);
-        const finalizing = this.finalizeVideoSession(state, session).catch((error: unknown) =>
+        const finalizing = this.enqueueStop(state, () => this.finalizeVideoSession(state, session)).catch((error: unknown) =>
             this.logger.error(`Error finalizing recording for producer ${producerId}: ${error}`),
         );
         state.pendingFinalizations.add(finalizing);
@@ -571,10 +589,11 @@ export class RecordingService {
 
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
         // Finalizes whatever's still open, AND waits for anything already finalizing in the
-        // background from an earlier individual stream stop (see pendingFinalizations) — both
-        // run concurrently, not sequentially, matching the original Promise.all semantics.
+        // background from an earlier individual stream stop (see pendingFinalizations). Routed
+        // through enqueueStop() (not called directly) so every open session's ffmpeg gets its
+        // graceful-quit signal staggered instead of all at once — see that method's comment.
         await Promise.all([
-            ...[...state.videoSessions.values()].map((session) => this.finalizeVideoSession(state, session)),
+            ...[...state.videoSessions.values()].map((session) => this.enqueueStop(state, () => this.finalizeVideoSession(state, session))),
             ...state.pendingFinalizations,
         ]);
     }

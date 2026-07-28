@@ -189,10 +189,16 @@ describe('RecordingService', () => {
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
                 startQueue: Promise.resolve(),
+                stopQueue: Promise.resolve(),
             };
         }
 
+        afterEach(() => {
+            jest.useRealTimers();
+        });
+
         it('notifyProducerClosing() removes the session from videoSessions synchronously but tracks it in pendingFinalizations until it settles', async () => {
+            jest.useFakeTimers();
             const state = buildState();
             let resolveFinalize!: () => void;
             const finalizeSpy = jest
@@ -210,8 +216,10 @@ describe('RecordingService', () => {
             expect(state.pendingFinalizations.size).toBe(1); // but tracked as in-flight
 
             resolveFinalize();
-            await Promise.resolve(); // let the .finally() cleanup microtask run
-            await Promise.resolve();
+            // Now routed through enqueueStop() (see notifyProducerClosing()), which adds an extra
+            // promise-chain hop before the .finally() cleanup fires — advancing timers also drains
+            // the extra microtask ticks that plain awaits below no longer reliably cover.
+            await jest.advanceTimersByTimeAsync(500);
             expect(state.pendingFinalizations.size).toBe(0); // cleaned up once settled
         });
 
@@ -260,6 +268,7 @@ describe('RecordingService', () => {
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
                 startQueue: Promise.resolve(),
+                stopQueue: Promise.resolve(),
             };
         }
 
@@ -287,7 +296,7 @@ describe('RecordingService', () => {
             await Promise.resolve();
             expect(order).toEqual(['first-start']); // second is still waiting on the stagger delay
 
-            await jest.advanceTimersByTimeAsync(2000);
+            await jest.advanceTimersByTimeAsync(500);
             expect(order).toEqual(['first-start', 'second-start']);
 
             await Promise.all([first, second]);
@@ -306,11 +315,106 @@ describe('RecordingService', () => {
                 order.push('second-start');
             });
 
-            await jest.advanceTimersByTimeAsync(2000);
+            await jest.advanceTimersByTimeAsync(500);
 
             expect(order).toEqual(['second-start']);
             await expect(first).rejects.toThrow('boom');
             await second;
+        });
+    });
+
+    describe('enqueueStop — throttling concurrent recording finalizations within a room', () => {
+        // Regression test: room "afcu", session "Checking" — mic and one screen share finalized
+        // fine, but the second screen share's ffmpeg didn't respond to the graceful-quit signal
+        // within the 5s SIGKILL grace period and came out corrupted. teardownRoom() (and
+        // notifyProducerClosing(), for an individually-stopped stream) used to finalize every open
+        // session concurrently via Promise.all — just as capable of piling simultaneous CPU-heavy
+        // ffmpeg work onto stop as an unstaggered start was. enqueueStop() serializes finalizes
+        // per room with the same settle pause enqueueStart() already uses for starts.
+        function buildState(): IRoomRecordingState {
+            return {
+                roomName: 'room1',
+                sessionDbId: 'session-1',
+                sessionName: 'Test Session',
+                videoSessions: new Map(),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+                startQueue: Promise.resolve(),
+                stopQueue: Promise.resolve(),
+            };
+        }
+
+        type EnqueueStop = (state: IRoomRecordingState, run: () => Promise<void>) => Promise<void>;
+        const enqueueStop = (state: IRoomRecordingState, run: () => Promise<void>) =>
+            (service as unknown as { enqueueStop: EnqueueStop }).enqueueStop.call(service, state, run);
+
+        afterEach(() => {
+            jest.useRealTimers();
+        });
+
+        it('does not begin the second queued stop until the first has settled plus the stagger delay', async () => {
+            jest.useFakeTimers();
+            const state = buildState();
+            const order: string[] = [];
+
+            const first = enqueueStop(state, async () => {
+                order.push('first-stop');
+            });
+            const second = enqueueStop(state, async () => {
+                order.push('second-stop');
+            });
+
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(order).toEqual(['first-stop']); // second is still waiting on the stagger delay
+
+            await jest.advanceTimersByTimeAsync(500);
+            expect(order).toEqual(['first-stop', 'second-stop']);
+
+            await Promise.all([first, second]);
+        });
+
+        it("a rejected stop doesn't jam the queue for the next one", async () => {
+            jest.useFakeTimers();
+            const state = buildState();
+            const order: string[] = [];
+
+            const first = enqueueStop(state, async () => {
+                throw new Error('boom');
+            });
+            first.catch(() => undefined);
+            const second = enqueueStop(state, async () => {
+                order.push('second-stop');
+            });
+
+            await jest.advanceTimersByTimeAsync(500);
+
+            expect(order).toEqual(['second-stop']);
+            await expect(first).rejects.toThrow('boom');
+            await second;
+        });
+
+        it('teardownRoom() staggers finalizing every still-open session instead of finalizing them all at once', async () => {
+            jest.useFakeTimers();
+            const state = buildState();
+            state.videoSessions.set('producer-1', { producerId: 'producer-1' } as IRecordingVideoSession);
+            state.videoSessions.set('producer-2', { producerId: 'producer-2' } as IRecordingVideoSession);
+            const order: string[] = [];
+            const finalizeSpy = jest.fn().mockImplementation(async (_state: IRoomRecordingState, session: IRecordingVideoSession) => {
+                order.push(session.producerId);
+            });
+            (service as unknown as { finalizeVideoSession: typeof finalizeSpy }).finalizeVideoSession = finalizeSpy;
+
+            const teardown = (service as unknown as { teardownRoom: (state: IRoomRecordingState) => Promise<void> }).teardownRoom(state);
+
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(order).toEqual(['producer-1']); // second session's finalize hasn't started yet
+
+            await jest.advanceTimersByTimeAsync(500);
+            expect(order).toEqual(['producer-1', 'producer-2']);
+
+            await teardown;
         });
     });
 });
