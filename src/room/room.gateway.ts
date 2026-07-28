@@ -28,6 +28,7 @@ import type {
     IJoinRoomPayload,
     IProducePayload,
     IResumeConsumerPayload,
+    ISetConsumerQualityPayload,
 } from './interfaces/room.interfaces';
 
 @WebSocketGateway({
@@ -277,6 +278,18 @@ export class RoomGateway implements OnGatewayDisconnect {
             return { ok: true };
         } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : 'Failed to resume consumer.' };
+        }
+    }
+
+    @SubscribeMessage('set-consumer-quality')
+    async onSetConsumerQuality(@ConnectedSocket() socket: Socket, @MessageBody() payload: ISetConsumerQualityPayload) {
+        // Same ok/error-ack shape as onResumeConsumer above, for the same reason — an uncaught
+        // throw here would leave the client's emitWithAck() promise hung forever.
+        try {
+            await this.roomService.setConsumerQuality(socket.id, payload.consumerId, payload.quality);
+            return { ok: true };
+        } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : 'Failed to change stream quality.' };
         }
     }
 

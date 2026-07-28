@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import * as mediasoup from 'mediasoup';
 import { types as mediasoupTypes } from 'mediasoup';
 import {
+    ConsumerQuality,
     IConsumerParams,
     IJoinRoomResult,
     IPeerState,
@@ -271,6 +272,13 @@ export class RoomService implements OnModuleInit {
             paused: true,
         });
         peer.consumers.set(consumer.id, consumer);
+        if (consumer.kind === 'video') {
+            // Every new video consumer starts at the lowest simulcast layer — most tiles just sit
+            // in the small dashboard grid and never get an explicit quality request at all (see
+            // Room.setQualityDemand() on the frontend, which only ever requests 'high'), so this
+            // is the only place anything sets 'low' in the first place.
+            await consumer.setPreferredLayers({ spatialLayer: 0 });
+        }
         return {
             id: consumer.id,
             producerId,
@@ -309,6 +317,29 @@ export class RoomService implements OnModuleInit {
                 this.logger.warn(`requestKeyFrame failed for consumer ${consumerId} (peer ${peerId}): ${error}`);
             }
         }
+    }
+
+    /** Switches a consumer between the lowest and highest simulcast spatial layer — 'low' for a
+     *  stream sitting in the small dashboard grid, 'high' the moment it's selected onto the main
+     *  stage, popped out, or made fullscreen (see the frontend's Room.setQualityDemand()). Resolves
+     *  'high' against the producer's own currently-negotiated encodings rather than a static
+     *  per-source table, so this stays correct even if the frontend's layer count ever changes. */
+    async setConsumerQuality(peerId: string, consumerId: string, quality: ConsumerQuality): Promise<void> {
+        const peer = this.requirePeer(peerId);
+        const consumer = peer.consumers.get(consumerId);
+        if (!consumer) {
+            throw new Error(`No consumer ${consumerId} for peer ${peerId}`);
+        }
+        if (consumer.kind !== 'video') {
+            return; // audio has no simulcast layers — nothing to adjust
+        }
+        if (quality === 'low') {
+            await consumer.setPreferredLayers({ spatialLayer: 0 });
+            return;
+        }
+        const producer = this.findProducer(consumer.producerId);
+        const highestLayer = Math.max(0, (producer?.rtpParameters.encodings?.length ?? 1) - 1);
+        await consumer.setPreferredLayers({ spatialLayer: highestLayer });
     }
 
     /** Closes one producer the peer voluntarily stopped (not a disconnect); returns info the gateway needs to notify the room. */
@@ -370,6 +401,18 @@ export class RoomService implements OnModuleInit {
             const record = peer.producers.get(producerId);
             if (record) {
                 return { peerId: peer.peerId, displayName: peer.displayName, source: record.source };
+            }
+        }
+        return null;
+    }
+
+    /** Same lookup as findProducerOwner(), but returns the actual Producer (needed to read its
+     *  negotiated simulcast encodings in setConsumerQuality()) rather than just owner metadata. */
+    private findProducer(producerId: string): mediasoupTypes.Producer | null {
+        for (const peer of this.peers.values()) {
+            const record = peer.producers.get(producerId);
+            if (record) {
+                return record.producer;
             }
         }
         return null;

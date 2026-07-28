@@ -60,6 +60,140 @@ describe('RoomService', () => {
         });
     });
 
+    describe('consume', () => {
+        function seedConsumingPeer(consumeMock: jest.Mock): void {
+            const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
+            peers.set('viewer-1', {
+                peerId: 'viewer-1',
+                userId: 'user-1',
+                displayName: 'Viewer',
+                pictureUrl: '',
+                micSelfMuted: false,
+                roomName: 'lobby',
+                router: { canConsume: () => true } as never,
+                sendTransport: null,
+                recvTransport: { consume: consumeMock } as never,
+                producers: new Map(),
+                consumers: new Map(),
+            });
+        }
+
+        it('defaults a freshly-created video consumer to the lowest simulcast layer', async () => {
+            const setPreferredLayers = jest.fn().mockResolvedValue(undefined);
+            const consumeMock = jest.fn().mockResolvedValue({ id: 'consumer-1', kind: 'video', rtpParameters: {}, setPreferredLayers });
+            seedConsumingPeer(consumeMock);
+
+            await service.consume('viewer-1', 'producer-1', {} as never);
+
+            expect(setPreferredLayers).toHaveBeenCalledWith({ spatialLayer: 0 });
+        });
+
+        it('does not touch layers for an audio consumer', async () => {
+            const setPreferredLayers = jest.fn().mockResolvedValue(undefined);
+            const consumeMock = jest.fn().mockResolvedValue({ id: 'consumer-1', kind: 'audio', rtpParameters: {}, setPreferredLayers });
+            seedConsumingPeer(consumeMock);
+
+            await service.consume('viewer-1', 'producer-1', {} as never);
+
+            expect(setPreferredLayers).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('setConsumerQuality', () => {
+        function seedPeerWithConsumer(consumer: { kind: 'video' | 'audio'; producerId: string; setPreferredLayers: jest.Mock }): void {
+            const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
+            const consumers = new Map([['consumer-1', consumer as never]]);
+            peers.set('viewer-1', {
+                peerId: 'viewer-1',
+                userId: 'user-1',
+                displayName: 'Viewer',
+                pictureUrl: '',
+                micSelfMuted: false,
+                roomName: 'lobby',
+                router: {} as never,
+                sendTransport: null,
+                recvTransport: null,
+                producers: new Map(),
+                consumers,
+            });
+        }
+
+        /** Seeds the producer-owning peer (a *different* peer than the one consuming it — mirrors
+         *  the real topology) so findProducer() inside setConsumerQuality() can resolve its
+         *  negotiated encodings. */
+        function seedOwningPeer(producerId: string, encodingsLength: number): void {
+            const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
+            peers.set('publisher-1', {
+                peerId: 'publisher-1',
+                userId: 'user-2',
+                displayName: 'Publisher',
+                pictureUrl: '',
+                micSelfMuted: false,
+                roomName: 'lobby',
+                router: {} as never,
+                sendTransport: null,
+                recvTransport: null,
+                producers: new Map([
+                    [
+                        producerId,
+                        {
+                            source: 'screen',
+                            producer: { rtpParameters: { encodings: Array.from({ length: encodingsLength }) } } as never,
+                        },
+                    ],
+                ]),
+                consumers: new Map(),
+            });
+        }
+
+        it("resolves 'high' to the producer's own highest negotiated layer index", async () => {
+            const setPreferredLayers = jest.fn().mockResolvedValue(undefined);
+            seedPeerWithConsumer({ kind: 'video', producerId: 'producer-1', setPreferredLayers });
+            seedOwningPeer('producer-1', 2); // 2-layer simulcast — highest index is 1
+
+            await service.setConsumerQuality('viewer-1', 'consumer-1', 'high');
+
+            expect(setPreferredLayers).toHaveBeenCalledWith({ spatialLayer: 1 });
+        });
+
+        it("resolves 'low' to spatial layer 0 regardless of the producer's layer count", async () => {
+            const setPreferredLayers = jest.fn().mockResolvedValue(undefined);
+            seedPeerWithConsumer({ kind: 'video', producerId: 'producer-1', setPreferredLayers });
+            seedOwningPeer('producer-1', 2);
+
+            await service.setConsumerQuality('viewer-1', 'consumer-1', 'low');
+
+            expect(setPreferredLayers).toHaveBeenCalledWith({ spatialLayer: 0 });
+        });
+
+        it('is a no-op for an audio consumer', async () => {
+            const setPreferredLayers = jest.fn().mockResolvedValue(undefined);
+            seedPeerWithConsumer({ kind: 'audio', producerId: 'producer-1', setPreferredLayers });
+
+            await service.setConsumerQuality('viewer-1', 'consumer-1', 'high');
+
+            expect(setPreferredLayers).not.toHaveBeenCalled();
+        });
+
+        it('falls back to spatial layer 0 for \'high\' if the owning producer can no longer be found', async () => {
+            const setPreferredLayers = jest.fn().mockResolvedValue(undefined);
+            seedPeerWithConsumer({ kind: 'video', producerId: 'producer-1', setPreferredLayers });
+            // No seedOwningPeer() call — producer genuinely gone (e.g. closed moments earlier).
+
+            await service.setConsumerQuality('viewer-1', 'consumer-1', 'high');
+
+            expect(setPreferredLayers).toHaveBeenCalledWith({ spatialLayer: 0 });
+        });
+
+        it('throws for an unknown consumerId', async () => {
+            seedPeerWithConsumer({ kind: 'video', producerId: 'producer-1', setPreferredLayers: jest.fn() });
+
+            await expect(service.setConsumerQuality('viewer-1', 'nonexistent-consumer', 'high')).rejects.toThrow(
+                'No consumer nonexistent-consumer for peer viewer-1',
+            );
+        });
+    });
+
     describe('joinRoom', () => {
         // Regression coverage: chat messages carry userId but not peerId/pictureUrl, and the
         // roster (peers) carried peerId/pictureUrl but not userId — no join key between them for

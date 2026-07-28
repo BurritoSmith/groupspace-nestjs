@@ -4,11 +4,11 @@ describe('RoomGateway', () => {
     let gateway: RoomGateway;
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
-    let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock };
+    let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
-        fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn() };
+        fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn() };
         gateway = new RoomGateway(
             fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
@@ -79,6 +79,25 @@ describe('RoomGateway', () => {
             gateway.onMicMuteChanged(fakeSocket({}), { muted: true });
 
             expect(toSpy).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('onSetConsumerQuality', () => {
+        it('resolves with { ok: true } after routing through roomService', async () => {
+            fakeRoomService.setConsumerQuality.mockResolvedValue(undefined);
+
+            const result = await gateway.onSetConsumerQuality(fakeSocket({}), { consumerId: 'consumer-1', quality: 'high' });
+
+            expect(fakeRoomService.setConsumerQuality).toHaveBeenCalledWith('peer-1', 'consumer-1', 'high');
+            expect(result).toEqual({ ok: true });
+        });
+
+        it('resolves with { ok: false, error } instead of throwing when roomService rejects', async () => {
+            fakeRoomService.setConsumerQuality.mockRejectedValue(new Error('No consumer consumer-1 for peer peer-1'));
+
+            const result = await gateway.onSetConsumerQuality(fakeSocket({}), { consumerId: 'consumer-1', quality: 'high' });
+
+            expect(result).toEqual({ ok: false, error: 'No consumer consumer-1 for peer peer-1' });
         });
     });
 
