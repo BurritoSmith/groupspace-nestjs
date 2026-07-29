@@ -348,6 +348,13 @@ export class RecordingService {
     // failing again on the live VM.
     private static readonly RECORDING_STAGGER_MS = 500;
 
+    // How long startVideoSession() watches a fresh video encoder for the "max delay reached"
+    // stall signal before committing to the attempt (see its own comment). Confirmed live: a
+    // starved encoder logged this ~6s after starting, so this needs real margin above that
+    // rather than matching the live-thumbnail GRACE_MS's much shorter 3s — a judgment call, not
+    // a measured floor, so raise it if a retry still isn't catching a real stall.
+    private static readonly STALL_CHECK_MS = 5000;
+
     /** Serializes `run` (a startVideoSession() or finalizeVideoSession() call) onto the room's
      *  single shared FIFO chain, so no two CPU-heavy ffmpeg spin-up/spin-down moments for this
      *  room ever land in the same instant — regardless of whether they're both starts (several
@@ -408,7 +415,9 @@ export class RecordingService {
         // port bookkeeping only tracks what THIS process has handed out, so it can't guarantee
         // a chosen port is actually free at the OS level (e.g. something outside our control
         // transiently holding it). A retry with a different port is far more useful than
-        // failing the whole recording over what's very likely a one-off collision.
+        // failing the whole recording over what's very likely a one-off collision. Also the
+        // retry path for a CPU-starved encoder that never wrote a frame — see the stall check
+        // just below.
         const MAX_ATTEMPTS = 3;
         let lastError: unknown;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -419,6 +428,7 @@ export class RecordingService {
             });
             const destPort = this.allocatePort();
             let sdpPath: string | null = null;
+            let ffmpeg: ChildProcess | null = null;
             try {
                 await transport.connect({ ip: '127.0.0.1', port: destPort });
                 const consumer = await transport.consume({
@@ -430,14 +440,41 @@ export class RecordingService {
                 sdpPath = path.join(this.sdpScratchDir, `${info.producerId}-${Date.now()}-${attempt}.sdp`);
                 await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, isAudio ? 'audio' : 'video'));
 
-                const ffmpeg = await this.spawnFfmpegAndWaitReady(
+                ffmpeg = await this.spawnFfmpegAndWaitReady(
                     this.buildRecordingFfmpegArgs(isAudio, sdpPath, this.tempRecordingPath(outputPath)),
                     `${info.source} ${info.producerId} port=${destPort} attempt=${attempt}`,
                 );
 
+                // Watches for ffmpeg's own "fell behind" signal — its SDP-based RTP demuxer logs
+                // this when packets are arriving (confirmed live, not a network/producer issue)
+                // but it can't process them fast enough to keep up, which is exactly the
+                // CPU-starvation signature that used to silently produce a hasContent: false
+                // recording (temp file empty at stop time) with no earlier sign anything was
+                // wrong. Only meaningful for video — audio's encode is cheap enough that this
+                // has never been observed there, and mic's own "no keyframe concept" comment
+                // already establishes video as the CPU-heavy side of this pipeline.
+                let stalled = false;
+                const onStallSignal = (chunk: Buffer) => {
+                    if (chunk.toString().includes('max delay reached')) {
+                        stalled = true;
+                    }
+                };
+                ffmpeg.stderr?.on('data', onStallSignal);
+
                 await consumer.resume();
                 if (!isAudio) {
                     await consumer.requestKeyFrame();
+                }
+
+                // Gives the encoder a real window to prove it's keeping up before committing to
+                // this attempt — has to run AFTER resume()/requestKeyFrame() above, since nothing
+                // flows (and so the stall signal can't appear) until then.
+                if (!isAudio) {
+                    await new Promise((resolve) => setTimeout(resolve, RecordingService.STALL_CHECK_MS));
+                }
+                ffmpeg.stderr?.removeListener('data', onStallSignal);
+                if (stalled) {
+                    throw new Error(`ffmpeg (${info.source} ${info.producerId}) fell behind consuming RTP (CPU-starved) — retrying`);
                 }
 
                 const dbId = randomUUID();
@@ -519,6 +556,15 @@ export class RecordingService {
                 if (sdpPath) {
                     void fs.unlink(sdpPath).catch(() => undefined);
                 }
+                // A stall-detected retry (unlike every other failure here) leaves a live ffmpeg
+                // process still running — kill it before the next attempt, both so it stops
+                // holding destPort at the OS level (our releasePort() above only frees our own
+                // bookkeeping) and because ffmpeg's `-n` flag refuses to overwrite the temp
+                // output path a retry would reuse, so that file must go too.
+                if (ffmpeg && ffmpeg.exitCode === null && ffmpeg.signalCode === null) {
+                    ffmpeg.kill('SIGKILL');
+                }
+                void fs.unlink(this.tempRecordingPath(outputPath)).catch(() => undefined);
                 this.logger.warn(
                     `Recording start attempt ${attempt}/${MAX_ATTEMPTS} failed for producer ${info.producerId} (port=${destPort}): ${error instanceof Error ? error.message : error}`,
                 );

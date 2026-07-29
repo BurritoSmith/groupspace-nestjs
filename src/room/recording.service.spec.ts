@@ -1,7 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { EventEmitter } from 'node:events';
+import { promises as fsPromises } from 'node:fs';
 import { PrismaService } from '../prisma/prisma.service';
 import { RecordingService } from './recording.service';
-import { IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
+import { IRecordingProducerInfo, IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
 
 function createFakePrisma() {
     return {
@@ -662,6 +664,162 @@ describe('RecordingService', () => {
             expect(order).toEqual(['producer-1', 'producer-2']);
 
             await teardown;
+        });
+    });
+
+    describe('startVideoSession — stall detection (CPU-starved encoder retry)', () => {
+        // Regression test for a real production incident: a screen-share's recording ffmpeg
+        // process received RTP fine (the live share worked, confirmed by other participants) but
+        // fell behind consuming it — logging ffmpeg's own "max delay reached. need to consume
+        // packet" — and never wrote a single frame, so remuxToFinalFile found the temp file empty
+        // and the recording silently came back hasContent: false with no earlier sign anything
+        // was wrong. startVideoSession now watches for that exact signal during a short window
+        // right after starting and, if seen, kills that attempt and retries on a fresh port —
+        // reusing the same MAX_ATTEMPTS retry loop already used for hard failures.
+        function buildFakeConsumer() {
+            return {
+                rtpParameters: { codecs: [{ mimeType: 'video/H264', payloadType: 96, clockRate: 90000 }] },
+                resume: jest.fn().mockResolvedValue(undefined),
+                requestKeyFrame: jest.fn().mockResolvedValue(undefined),
+            };
+        }
+
+        function buildFakeRouter(consumers: ReturnType<typeof buildFakeConsumer>[]) {
+            let call = 0;
+            return {
+                rtpCapabilities: {},
+                createPlainTransport: jest.fn().mockImplementation(() =>
+                    Promise.resolve({
+                        connect: jest.fn().mockResolvedValue(undefined),
+                        consume: jest.fn().mockImplementation(() => Promise.resolve(consumers[Math.min(call++, consumers.length - 1)])),
+                        close: jest.fn(),
+                    }),
+                ),
+            };
+        }
+
+        function buildFakeFfmpeg() {
+            return { stderr: new EventEmitter(), kill: jest.fn(), exitCode: null, signalCode: null };
+        }
+
+        function buildState(): IRoomRecordingState {
+            return {
+                roomName: 'room1',
+                sessionDbId: 'session-1',
+                sessionName: 'Test Session',
+                startedAt: new Date('2026-07-29T12:00:00.000Z'),
+                videoSessions: new Map(),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+                opQueue: Promise.resolve(),
+            };
+        }
+
+        const producerInfo: IRecordingProducerInfo = {
+            producerId: 'producer-1',
+            peerId: 'peer-1',
+            userId: 'user-1',
+            displayName: 'Clay',
+            source: 'screen',
+        };
+
+        type StartVideoSession = (
+            state: IRoomRecordingState,
+            router: unknown,
+            info: IRecordingProducerInfo,
+        ) => Promise<void>;
+
+        let recordingCreate: jest.Mock;
+        let recordingService: RecordingService;
+
+        beforeEach(() => {
+            jest.useFakeTimers();
+            recordingCreate = jest.fn().mockResolvedValue({ id: 'db-1', userId: 'user-1', user: null });
+            const fakePrisma = { ...createFakePrisma(), recording: { create: recordingCreate } };
+            recordingService = new RecordingService(fakePrisma as never);
+            jest.spyOn(fsPromises, 'writeFile').mockResolvedValue(undefined);
+            jest.spyOn(fsPromises, 'unlink').mockResolvedValue(undefined);
+        });
+
+        afterEach(() => {
+            jest.useRealTimers();
+            jest.restoreAllMocks();
+        });
+
+        // Pragmatic microtask flush — startVideoSession chains several already-mocked-resolved
+        // awaits (transport.connect, transport.consume, fs.writeFile, spawnFfmpegAndWaitReady,
+        // consumer.resume) before reaching the stall-check setTimeout; this drains all of them
+        // without needing to count exactly how many ticks each one takes.
+        async function flushMicrotasks(): Promise<void> {
+            for (let i = 0; i < 10; i++) {
+                await Promise.resolve();
+            }
+        }
+
+        it('kills the stalled ffmpeg and retries on a fresh port when the stall signal appears within the check window', async () => {
+            const state = buildState();
+            const router = buildFakeRouter([buildFakeConsumer(), buildFakeConsumer()]);
+            const stalledFfmpeg = buildFakeFfmpeg();
+            const healthyFfmpeg = buildFakeFfmpeg();
+            let spawnCall = 0;
+            (recordingService as unknown as { spawnFfmpegAndWaitReady: jest.Mock }).spawnFfmpegAndWaitReady = jest
+                .fn()
+                .mockImplementation(() => Promise.resolve(spawnCall++ === 0 ? stalledFfmpeg : healthyFfmpeg));
+
+            const promise = (
+                recordingService as unknown as { startVideoSession: StartVideoSession }
+            ).startVideoSession(state, router as never, producerInfo);
+
+            await flushMicrotasks();
+            stalledFfmpeg.stderr.emit('data', Buffer.from('[sdp @ 0x1] max delay reached. need to consume packet\n'));
+            await jest.advanceTimersByTimeAsync(5000); // first attempt's stall-check window elapses
+
+            await flushMicrotasks();
+            await jest.advanceTimersByTimeAsync(5000); // second (healthy) attempt's own window elapses
+
+            await promise;
+
+            expect(stalledFfmpeg.kill).toHaveBeenCalledWith('SIGKILL');
+            expect(recordingCreate).toHaveBeenCalledTimes(1); // only the successful 2nd attempt persisted a row
+            expect(state.videoSessions.get('producer-1')?.ffmpeg).toBe(healthyFfmpeg);
+        });
+
+        it('does not retry, and does not kill ffmpeg, when no stall signal appears within the check window', async () => {
+            const state = buildState();
+            const router = buildFakeRouter([buildFakeConsumer()]);
+            const ffmpeg = buildFakeFfmpeg();
+            (recordingService as unknown as { spawnFfmpegAndWaitReady: jest.Mock }).spawnFfmpegAndWaitReady = jest
+                .fn()
+                .mockResolvedValue(ffmpeg);
+
+            const promise = (
+                recordingService as unknown as { startVideoSession: StartVideoSession }
+            ).startVideoSession(state, router as never, producerInfo);
+
+            await flushMicrotasks();
+            await jest.advanceTimersByTimeAsync(5000);
+
+            await promise;
+
+            expect(ffmpeg.kill).not.toHaveBeenCalled();
+            expect(recordingCreate).toHaveBeenCalledTimes(1);
+            expect(state.videoSessions.get('producer-1')?.ffmpeg).toBe(ffmpeg);
+        });
+
+        it('skips the stall-check delay entirely for audio (mic) producers', async () => {
+            const state = buildState();
+            const router = buildFakeRouter([buildFakeConsumer()]);
+            const ffmpeg = buildFakeFfmpeg();
+            (recordingService as unknown as { spawnFfmpegAndWaitReady: jest.Mock }).spawnFfmpegAndWaitReady = jest
+                .fn()
+                .mockResolvedValue(ffmpeg);
+
+            await (recordingService as unknown as { startVideoSession: StartVideoSession }).startVideoSession(state, router as never, {
+                ...producerInfo,
+                source: 'mic',
+            });
+
+            expect(recordingCreate).toHaveBeenCalledTimes(1); // resolved without needing advanceTimersByTimeAsync at all
         });
     });
 });
