@@ -362,7 +362,7 @@ export class RoomService implements OnModuleInit {
     }
 
     /** Tears down everything owned by a disconnecting peer; returns info the gateway needs to notify the room. */
-    closePeer(peerId: string): { roomName: string; displayName: string; removedProducerIds: string[] } | null {
+    closePeer(peerId: string): { roomName: string; displayName: string; userId: string; removedProducerIds: string[] } | null {
         const peer = this.peers.get(peerId);
         if (!peer) {
             return null;
@@ -377,7 +377,7 @@ export class RoomService implements OnModuleInit {
         }
         peer.sendTransport?.close();
         peer.recvTransport?.close();
-        return { roomName: peer.roomName, displayName: peer.displayName, removedProducerIds };
+        return { roomName: peer.roomName, displayName: peer.displayName, userId: peer.userId, removedProducerIds };
     }
 
     /** Snapshot of a room's router + every currently active producer, handed to RecordingService.start(). */

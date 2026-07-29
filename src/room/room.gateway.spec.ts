@@ -4,13 +4,13 @@ describe('RoomGateway', () => {
     let gateway: RoomGateway;
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
-    let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock };
+    let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock; closePeer: jest.Mock };
     let fakeChatService: { saveMessage: jest.Mock };
     let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
-        fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn() };
+        fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn(), closePeer: jest.fn() };
         fakeChatService = { saveMessage: jest.fn() };
         fakeUserSettingsService = { save: jest.fn().mockResolvedValue(undefined), getAll: jest.fn().mockResolvedValue([]) };
         gateway = new RoomGateway(
@@ -32,7 +32,7 @@ describe('RoomGateway', () => {
     });
 
     function fakeSocket(data: Record<string, unknown>) {
-        return { id: 'peer-1', data, to: toSpy } as never;
+        return { id: 'peer-1', data, to: toSpy, join: jest.fn().mockResolvedValue(undefined), leave: jest.fn().mockResolvedValue(undefined) } as never;
     }
 
     describe('onUserTyping', () => {
@@ -168,6 +168,153 @@ describe('RoomGateway', () => {
             });
 
             expect(result).toEqual({ ok: false, error: 'DB unavailable' });
+        });
+    });
+
+    describe('cleanupPeer (via onLeaveRoom)', () => {
+        it("logs a 'leave' RecordingEvent when a recording is active for the peer's room", () => {
+            fakeRoomService.closePeer = jest
+                .fn()
+                .mockReturnValue({ roomName: 'lobby', displayName: 'Alice', userId: 'user-1', removedProducerIds: [] });
+            const fakeRecordingService = { events: { on: jest.fn() }, getActiveSessionId: jest.fn().mockReturnValue('session-1'), logEvent: jest.fn() };
+            const localGateway = new RoomGateway(
+                fakeRoomService as never,
+                {} as never,
+                {} as never,
+                fakeRecordingService as never,
+                {} as never,
+                fakeUserSettingsService as never,
+                fakeChatService as never,
+                {} as never,
+            );
+
+            localGateway.onLeaveRoom(fakeSocket({}));
+
+            expect(fakeRecordingService.logEvent).toHaveBeenCalledWith('session-1', 'leave', 'peer-1', 'user-1', 'Alice');
+        });
+
+        it("does not log an event when no recording is active for the peer's room", () => {
+            fakeRoomService.closePeer = jest
+                .fn()
+                .mockReturnValue({ roomName: 'lobby', displayName: 'Alice', userId: 'user-1', removedProducerIds: [] });
+            const fakeRecordingService = { events: { on: jest.fn() }, getActiveSessionId: jest.fn().mockReturnValue(null), logEvent: jest.fn() };
+            const localGateway = new RoomGateway(
+                fakeRoomService as never,
+                {} as never,
+                {} as never,
+                fakeRecordingService as never,
+                {} as never,
+                fakeUserSettingsService as never,
+                fakeChatService as never,
+                {} as never,
+            );
+
+            localGateway.onLeaveRoom(fakeSocket({}));
+
+            expect(fakeRecordingService.logEvent).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('onGetRecordingSession', () => {
+        it('merges chatHistory (fetched via ChatService, scoped to the session window) into the returned session', async () => {
+            const session = {
+                id: 'session-1',
+                name: 'Test Session',
+                roomName: 'lobby',
+                startedAt: '2026-07-28T12:00:00.000Z',
+                stoppedAt: '2026-07-28T13:00:00.000Z',
+                recordings: [],
+                events: [],
+                chatHistory: [],
+            };
+            const fakeRecordingService = { events: { on: jest.fn() }, getSessionDetail: jest.fn().mockResolvedValue(session) };
+            const chatHistory = [{ id: 'msg-1', userId: 'user-1', displayName: 'Alice', pictureUrl: '', text: 'hi', at: '2026-07-28T12:05:00.000Z' }];
+            const localChatService = { saveMessage: jest.fn(), getHistoryForSession: jest.fn().mockResolvedValue(chatHistory) };
+            const localGateway = new RoomGateway(
+                fakeRoomService as never,
+                {} as never,
+                {} as never,
+                fakeRecordingService as never,
+                {} as never,
+                fakeUserSettingsService as never,
+                localChatService as never,
+                {} as never,
+            );
+
+            const result = await localGateway.onGetRecordingSession({ id: 'session-1' });
+
+            expect(localChatService.getHistoryForSession).toHaveBeenCalledWith(
+                'lobby',
+                new Date('2026-07-28T12:00:00.000Z'),
+                new Date('2026-07-28T13:00:00.000Z'),
+            );
+            expect(result).toEqual({ session: { ...session, chatHistory } });
+        });
+
+        it('returns { session: null } without touching ChatService when the session does not exist', async () => {
+            const fakeRecordingService = { events: { on: jest.fn() }, getSessionDetail: jest.fn().mockResolvedValue(null) };
+            const localChatService = { saveMessage: jest.fn(), getHistoryForSession: jest.fn() };
+            const localGateway = new RoomGateway(
+                fakeRoomService as never,
+                {} as never,
+                {} as never,
+                fakeRecordingService as never,
+                {} as never,
+                fakeUserSettingsService as never,
+                localChatService as never,
+                {} as never,
+            );
+
+            const result = await localGateway.onGetRecordingSession({ id: 'missing' });
+
+            expect(localChatService.getHistoryForSession).not.toHaveBeenCalled();
+            expect(result).toEqual({ session: null });
+        });
+    });
+
+    describe('onJoinRoom — recording-event logging', () => {
+        function buildGateway(activeSessionId: string | null) {
+            const fakeRecordingService = {
+                events: { on: jest.fn() },
+                getActiveSessionId: jest.fn().mockReturnValue(activeSessionId),
+                logEvent: jest.fn(),
+            };
+            const fakeSessionService = { verify: jest.fn().mockReturnValue({ userId: 'user-1' }), issue: jest.fn().mockReturnValue('token-1') };
+            const fakeUsersService = { findById: jest.fn().mockResolvedValue({ id: 'user-1', displayName: 'Alice', pictureUrl: 'pic' }) };
+            const localRoomService = {
+                events: { on: jest.fn() },
+                joinRoom: jest.fn().mockResolvedValue({ peerId: 'peer-1', peers: [], existingProducers: [], routerRtpCapabilities: {} }),
+            };
+            const localChatService = { saveMessage: jest.fn(), getRecentHistory: jest.fn().mockResolvedValue([]) };
+            const fakeTurnCredentialsService = { generateFor: jest.fn().mockReturnValue(null) };
+            const localUserSettingsService = { save: jest.fn(), getAll: jest.fn().mockResolvedValue([]) };
+            const localGateway = new RoomGateway(
+                localRoomService as never,
+                fakeTurnCredentialsService as never,
+                {} as never,
+                fakeRecordingService as never,
+                fakeUsersService as never,
+                localUserSettingsService as never,
+                localChatService as never,
+                fakeSessionService as never,
+            );
+            return { localGateway, fakeRecordingService };
+        }
+
+        it("logs a 'join' RecordingEvent when a recording is active for the room being joined", async () => {
+            const { localGateway, fakeRecordingService } = buildGateway('session-1');
+
+            await localGateway.onJoinRoom(fakeSocket({}), { roomName: 'lobby', sessionToken: 'existing-token' });
+
+            expect(fakeRecordingService.logEvent).toHaveBeenCalledWith('session-1', 'join', 'peer-1', 'user-1', 'Alice');
+        });
+
+        it('does not log an event when no recording is active for the room being joined', async () => {
+            const { localGateway, fakeRecordingService } = buildGateway(null);
+
+            await localGateway.onJoinRoom(fakeSocket({}), { roomName: 'lobby', sessionToken: 'existing-token' });
+
+            expect(fakeRecordingService.logEvent).not.toHaveBeenCalled();
         });
     });
 

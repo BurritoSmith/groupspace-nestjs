@@ -63,8 +63,27 @@ model RecordingSession {
   stoppedAt DateTime?
 
   recordings Recording[]
+  events     RecordingEvent[]
 
   @@index([roomName, startedAt])
+}
+
+// A timestamped occurrence during an active recording — currently just participant join/leave
+// (screen-share start/stop needs no row here at all; it's synthesized on read from Recording's
+// own streamType: 'screen' rows, which already have their own startedAt/stoppedAt). Only ever
+// written while a recording is actually running for the room — see RoomGateway's onJoinRoom/
+// cleanupPeer, gated on RecordingService.isRecording().
+model RecordingEvent {
+  id          String           @id @default(uuid())
+  sessionId   String
+  session     RecordingSession @relation(fields: [sessionId], references: [id])
+  type        String // 'join' | 'leave' — plain String, matching streamType/thumbnailStatus's own convention
+  peerId      String
+  userId      String?
+  displayName String // snapshot at event time, same rationale as Recording.displayName
+  at          DateTime         @default(now())
+
+  @@index([sessionId, at])
 }
 
 model ChatMessage {

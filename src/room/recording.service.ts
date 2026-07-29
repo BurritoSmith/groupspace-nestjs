@@ -13,6 +13,7 @@ import {
     IRecordingSessionDetail,
     IRecordingSessionSummary,
     IRecordingSnapshot,
+    IRecordingTimelineEvent,
     IRecordingVideoSession,
     IRoomRecordingState,
 } from './interfaces/recording.interfaces';
@@ -82,6 +83,21 @@ export class RecordingService {
         return this.rooms.get(roomName)?.startedAt ?? null;
     }
 
+    /** The DB id of the room's currently-active recording session, or null if it isn't recording
+     *  — used by RoomGateway to decide whether/where to log a join/leave RecordingEvent. */
+    getActiveSessionId(roomName: string): string | null {
+        return this.rooms.get(roomName)?.sessionDbId ?? null;
+    }
+
+    /** Fire-and-forget, matching ChatService.saveMessage's convention — a slow/failed write must
+     *  never delay the join/leave flow it's called from. Only ever called while a recording is
+     *  actually active for the room (see RoomGateway's onJoinRoom/cleanupPeer). */
+    logEvent(sessionId: string, type: 'join' | 'leave', peerId: string, userId: string | null, displayName: string): void {
+        this.prisma.recordingEvent
+            .create({ data: { sessionId, type, peerId, userId, displayName } })
+            .catch((error: unknown) => this.logger.error(`Failed to log ${type} event for recording session ${sessionId}: ${error}`));
+    }
+
     /** Most recent recording sessions for a room, for the toolbar's recordings dropdown. */
     async listRecentSessions(roomName: string, limit = 10): Promise<IRecordingSessionSummary[]> {
         const sessions = await this.prisma.recordingSession.findMany({
@@ -140,7 +156,31 @@ export class RecordingService {
             startedAt: session.startedAt.toISOString(),
             stoppedAt: session.stoppedAt?.toISOString() ?? null,
             recordings,
+            events: await this.getTimelineEvents(sessionId, session.recordings),
+            chatHistory: [], // populated by RoomGateway's onGetRecordingSession via ChatService, not here
         };
+    }
+
+    /** Merges persisted join/leave RecordingEvent rows with screenshare-start/end markers
+     *  synthesized from the session's own streamType: 'screen' Recording rows (no separate
+     *  persistence needed for those — see IRecordingTimelineEvent's comment), sorted by time. */
+    private async getTimelineEvents(
+        sessionId: string,
+        recordings: { streamType: string; displayName: string; startedAt: Date; stoppedAt: Date | null }[],
+    ): Promise<IRecordingTimelineEvent[]> {
+        const persisted = await this.prisma.recordingEvent.findMany({ where: { sessionId }, orderBy: { at: 'asc' } });
+        const events: IRecordingTimelineEvent[] = persisted.map((event) => ({
+            type: event.type as 'join' | 'leave',
+            displayName: event.displayName,
+            at: event.at.toISOString(),
+        }));
+        for (const recording of recordings.filter((r) => r.streamType === 'screen')) {
+            events.push({ type: 'screenshare-start', displayName: recording.displayName, at: recording.startedAt.toISOString() });
+            if (recording.stoppedAt) {
+                events.push({ type: 'screenshare-end', displayName: recording.displayName, at: recording.stoppedAt.toISOString() });
+            }
+        }
+        return events.sort((a, b) => a.at.localeCompare(b.at));
     }
 
     /** Fresh signed URL for a GCS object — never persisted, since signed URLs expire.

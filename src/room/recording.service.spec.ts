@@ -3,6 +3,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RecordingService } from './recording.service';
 import { IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
 
+function createFakePrisma() {
+    return {
+        recordingSession: { findUnique: jest.fn() },
+        recordingEvent: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({}) },
+    };
+}
+
 describe('RecordingService', () => {
     let service: RecordingService;
 
@@ -36,6 +43,102 @@ describe('RecordingService', () => {
 
         it('returns null for a room that is not currently recording', () => {
             expect(service.getRecordingStartedAt('room1')).toBeNull();
+        });
+    });
+
+    describe('getActiveSessionId', () => {
+        it("returns the active recording session's DB id for a room", () => {
+            (service as unknown as { rooms: Map<string, IRoomRecordingState> }).rooms.set('room1', {
+                roomName: 'room1',
+                sessionDbId: 'session-1',
+                sessionName: 'Test Session',
+                startedAt: new Date(),
+                videoSessions: new Map(),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+                startQueue: Promise.resolve(),
+                stopQueue: Promise.resolve(),
+            });
+
+            expect(service.getActiveSessionId('room1')).toBe('session-1');
+        });
+
+        it('returns null for a room that is not currently recording', () => {
+            expect(service.getActiveSessionId('room1')).toBeNull();
+        });
+    });
+
+    describe('logEvent', () => {
+        it('creates a RecordingEvent row with the given fields', () => {
+            const fakePrisma = createFakePrisma();
+            const recordingService = new RecordingService(fakePrisma as never);
+
+            recordingService.logEvent('session-1', 'join', 'peer-1', 'user-1', 'Alice');
+
+            expect(fakePrisma.recordingEvent.create).toHaveBeenCalledWith({
+                data: { sessionId: 'session-1', type: 'join', peerId: 'peer-1', userId: 'user-1', displayName: 'Alice' },
+            });
+        });
+    });
+
+    describe('getSessionDetail — timeline events', () => {
+        it('merges persisted join/leave events with screenshare-start/end synthesized from screen recordings, sorted by time', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.recordingSession.findUnique.mockResolvedValue({
+                id: 'session-1',
+                name: 'Test Session',
+                roomName: 'room1',
+                startedAt: new Date('2026-07-28T12:00:00.000Z'),
+                stoppedAt: null,
+                recordings: [
+                    {
+                        id: 'rec-1',
+                        filename: 'a.mp4',
+                        streamType: 'screen',
+                        displayName: 'Alice',
+                        userId: 'user-1',
+                        user: { pictureUrl: null },
+                        gcsPath: null,
+                        gcsUploadedAt: null,
+                        thumbnailStatus: null,
+                        thumbnailUpdatedAt: null,
+                        startedAt: new Date('2026-07-28T12:04:00.000Z'),
+                        stoppedAt: new Date('2026-07-28T12:05:00.000Z'),
+                        hasContent: true,
+                    },
+                ],
+            });
+            fakePrisma.recordingEvent.findMany.mockResolvedValue([
+                { type: 'join', displayName: 'Alice', at: new Date('2026-07-28T12:00:00.000Z') },
+                { type: 'leave', displayName: 'Bob', at: new Date('2026-07-28T12:10:00.000Z') },
+            ]);
+            const recordingService = new RecordingService(fakePrisma as never);
+
+            const result = await recordingService.getSessionDetail('session-1');
+
+            expect(result?.events.map((e) => e.type)).toEqual(['join', 'screenshare-start', 'screenshare-end', 'leave']);
+            expect(result?.events[1]).toEqual({
+                type: 'screenshare-start',
+                displayName: 'Alice',
+                at: '2026-07-28T12:04:00.000Z',
+            });
+        });
+
+        it('returns an empty chatHistory — populated by RoomGateway, not RecordingService', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.recordingSession.findUnique.mockResolvedValue({
+                id: 'session-1',
+                name: 'Test Session',
+                roomName: 'room1',
+                startedAt: new Date(),
+                stoppedAt: null,
+                recordings: [],
+            });
+            const recordingService = new RecordingService(fakePrisma as never);
+
+            const result = await recordingService.getSessionDetail('session-1');
+
+            expect(result?.chatHistory).toEqual([]);
         });
     });
 

@@ -168,6 +168,10 @@ export class RoomGateway implements OnGatewayDisconnect {
             socket.to(closed.roomName).emit('producer-closed', { producerId });
         }
         socket.to(closed.roomName).emit('peer-left', { peerId: socket.id, displayName: closed.displayName });
+        const activeSessionId = this.recordingService.getActiveSessionId(closed.roomName);
+        if (activeSessionId) {
+            this.recordingService.logEvent(activeSessionId, 'leave', socket.id, closed.userId, closed.displayName);
+        }
         // No-op on a socket that's already disconnecting; matters for the still-connected
         // leave-room path so a later join-room on this same socket starts from a clean slate.
         void socket.leave(closed.roomName);
@@ -216,6 +220,10 @@ export class RoomGateway implements OnGatewayDisconnect {
         socket.data.userId = userId;
         socket.data.pictureUrl = pictureUrl;
         socket.to(roomName).emit('peer-joined', { peerId: socket.id, userId, displayName, pictureUrl, micSelfMuted: false });
+        const activeSessionId = this.recordingService.getActiveSessionId(roomName);
+        if (activeSessionId) {
+            this.recordingService.logEvent(activeSessionId, 'join', socket.id, userId, displayName);
+        }
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
         const userSettings = await this.userSettingsService.getAll(userId);
@@ -354,7 +362,15 @@ export class RoomGateway implements OnGatewayDisconnect {
     async onGetRecordingSession(@MessageBody() payload: { id: string }) {
         try {
             const session = await this.recordingService.getSessionDetail(payload.id);
-            return { session };
+            if (!session) {
+                return { session: null };
+            }
+            const chatHistory = await this.chatService.getHistoryForSession(
+                session.roomName,
+                new Date(session.startedAt),
+                session.stoppedAt ? new Date(session.stoppedAt) : null,
+            );
+            return { session: { ...session, chatHistory } };
         } catch (error) {
             this.logger.error(`Failed to load recording session ${payload.id}: ${error}`);
             return { session: null };
