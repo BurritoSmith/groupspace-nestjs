@@ -32,9 +32,11 @@ interface IPlaybackUrlSourceRow {
  * Records every active stream in a room by forwarding each producer's RTP to
  * a local ffmpeg process via a mediasoup PlainTransport (loopback-only —
  * network_mode: host means ffmpeg shares the app container's network
- * namespace directly, no Docker port-mapping needed). Video streams are
- * transcoded to H.264 (mediasoup's own codec is VP8; VP8-in-MP4 has patchy
- * playback support, so we pay the transcode cost for universal .mp4 output).
+ * namespace directly, no Docker port-mapping needed). ffmpeg stream-copies
+ * (no transcode) straight into .webm — mediasoup only ever negotiates VP8
+ * (video) + Opus (audio), which is WebM's own native codec pair, so there's
+ * nothing to re-encode; this is a direct passthrough of whatever the sending
+ * browser's own encoder already produced.
  * Every producer — webcam, screen, AND mic — gets its own fully independent
  * recording session (one PlainTransport, one ffmpeg process, one Recording
  * row), synced together afterward on the shared playback timeline via each
@@ -212,7 +214,7 @@ export class RecordingService {
 
     /** Same derive-by-string-replace convention as tempRecordingPath — no DB column needed for the path itself. */
     private thumbnailPath(finalPath: string): string {
-        return finalPath.replace(/\.mp4$/, '.thumb.jpg');
+        return finalPath.replace(/\.webm$/, '.thumb.jpg');
     }
 
     /** thumbnailUpdatedAt doubles as a cache-busting query param — the derived thumbnail filename is
@@ -271,18 +273,23 @@ export class RecordingService {
             videoSessions: new Map(),
             streamNumberCounters: new Map(),
             pendingFinalizations: new Set(),
-            opQueue: Promise.resolve(),
         };
         // Set before awaiting so a concurrent start-recording call for the same room fails fast.
         this.rooms.set(roomName, state);
 
         try {
-            // webcam, screen, AND mic all go through the same per-producer session now. Routed
-            // through enqueueOp() (not called directly) so starts are staggered the same way
-            // as notifyProducerCreated()'s — several producers already existing when recording is
-            // turned on is exactly the scenario that starved encoders in the "hunch" incident.
-            for (const producer of snapshot.producers) {
-                await this.enqueueOp(state, () => this.startVideoSession(state, snapshot.router, producer));
+            // webcam, screen, AND mic all go through the same per-producer session now, started
+            // concurrently — each is just a cheap RTP stream-copy (see buildRecordingFfmpegArgs),
+            // so there's no CPU contention to stagger against. allSettled (not all) so a slower
+            // producer still gets to register itself in state.videoSessions even if an earlier
+            // one has already failed — teardownRoom() below only cleans up what's actually in
+            // that map, so racing ahead on the first rejection could leak a still-in-flight one.
+            const results = await Promise.allSettled(
+                snapshot.producers.map((producer) => this.startVideoSession(state, snapshot.router, producer)),
+            );
+            const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+            if (failure) {
+                throw failure.reason;
             }
         } catch (error) {
             this.rooms.delete(roomName);
@@ -335,45 +342,9 @@ export class RecordingService {
         if (producer.source === 'mic') {
             this.logEvent(state.sessionDbId, 'join', producer.peerId, producer.userId, producer.displayName);
         }
-        void this.enqueueOp(state, () => this.startVideoSession(state, router, producer)).catch((error: unknown) =>
+        void this.startVideoSession(state, router, producer).catch((error: unknown) =>
             this.logger.error(`Failed to start recording ${producer.source} producer ${producer.producerId} in room ${roomName}: ${error}`),
         );
-    }
-
-    // Pause held after one queued start OR stop settles, before the next one (of the same kind)
-    // begins — gives that encoder's CPU-heavy moment (start: keyframe + encoder warm-up; stop:
-    // flushing buffered frames and finalizing the encode) a moment to pass rather than piling
-    // straight into the next one. Trimmed from an earlier, more conservative 2000ms — this is
-    // still a judgment call, not a measured floor, so nudge it back up if staggered stops start
-    // failing again on the live VM.
-    private static readonly RECORDING_STAGGER_MS = 500;
-
-    // How long startVideoSession() watches a fresh video encoder for the "max delay reached"
-    // stall signal before committing to the attempt (see its own comment). Confirmed live: a
-    // starved encoder logged this ~6s after starting, so this needs real margin above that
-    // rather than matching the live-thumbnail GRACE_MS's much shorter 3s — a judgment call, not
-    // a measured floor, so raise it if a retry still isn't catching a real stall.
-    private static readonly STALL_CHECK_MS = 5000;
-
-    /** Serializes `run` (a startVideoSession() or finalizeVideoSession() call) onto the room's
-     *  single shared FIFO chain, so no two CPU-heavy ffmpeg spin-up/spin-down moments for this
-     *  room ever land in the same instant — regardless of whether they're both starts (several
-     *  producers negotiating close together), both stops ("stop all streams" closing several
-     *  producers at once, or teardownRoom's Promise.all), or one of each (a stream's finalize
-     *  racing a *different* stream's start — confirmed as the cause of a rejoining participant's
-     *  mic recording coming out corrupted when their leave's finalize and their rejoin's start
-     *  landed close together; see recording-cpu-starvation-history). One operation's rejection is
-     *  captured here and does not propagate into the chain, so it can never jam subsequent queued
-     *  operations; the caller still observes the rejection via the returned promise. */
-    private enqueueOp(state: IRoomRecordingState, run: () => Promise<void>): Promise<void> {
-        // state.opQueue never itself rejects (see the .catch(() => undefined) below), so chaining
-        // with .then(run) alone is safe — run() only ever begins once its predecessor, success or
-        // failure, has fully settled (including its stagger pause).
-        const settled = state.opQueue.then(run);
-        state.opQueue = settled
-            .catch(() => undefined)
-            .then(() => new Promise<void>((resolve) => setTimeout(resolve, RecordingService.RECORDING_STAGGER_MS)));
-        return settled;
     }
 
     /** Fire-and-forget hook for a closing producer — webcam, screen, or mic. No-op if there's no
@@ -391,7 +362,7 @@ export class RecordingService {
             this.logEvent(state.sessionDbId, 'leave', session.peerId, session.userId, session.displayName);
         }
         state.videoSessions.delete(producerId);
-        const finalizing = this.enqueueOp(state, () => this.finalizeVideoSession(state, session)).catch((error: unknown) =>
+        const finalizing = this.finalizeVideoSession(state, session).catch((error: unknown) =>
             this.logger.error(`Error finalizing recording for producer ${producerId}: ${error}`),
         );
         state.pendingFinalizations.add(finalizing);
@@ -415,9 +386,7 @@ export class RecordingService {
         // port bookkeeping only tracks what THIS process has handed out, so it can't guarantee
         // a chosen port is actually free at the OS level (e.g. something outside our control
         // transiently holding it). A retry with a different port is far more useful than
-        // failing the whole recording over what's very likely a one-off collision. Also the
-        // retry path for a CPU-starved encoder that never wrote a frame — see the stall check
-        // just below.
+        // failing the whole recording over what's very likely a one-off collision.
         const MAX_ATTEMPTS = 3;
         let lastError: unknown;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -441,40 +410,13 @@ export class RecordingService {
                 await fs.writeFile(sdpPath, this.buildSdp(destPort, codec, isAudio ? 'audio' : 'video'));
 
                 ffmpeg = await this.spawnFfmpegAndWaitReady(
-                    this.buildRecordingFfmpegArgs(isAudio, sdpPath, this.tempRecordingPath(outputPath)),
+                    this.buildRecordingFfmpegArgs(sdpPath, this.tempRecordingPath(outputPath)),
                     `${info.source} ${info.producerId} port=${destPort} attempt=${attempt}`,
                 );
-
-                // Watches for ffmpeg's own "fell behind" signal — its SDP-based RTP demuxer logs
-                // this when packets are arriving (confirmed live, not a network/producer issue)
-                // but it can't process them fast enough to keep up, which is exactly the
-                // CPU-starvation signature that used to silently produce a hasContent: false
-                // recording (temp file empty at stop time) with no earlier sign anything was
-                // wrong. Only meaningful for video — audio's encode is cheap enough that this
-                // has never been observed there, and mic's own "no keyframe concept" comment
-                // already establishes video as the CPU-heavy side of this pipeline.
-                let stalled = false;
-                const onStallSignal = (chunk: Buffer) => {
-                    if (chunk.toString().includes('max delay reached')) {
-                        stalled = true;
-                    }
-                };
-                ffmpeg.stderr?.on('data', onStallSignal);
 
                 await consumer.resume();
                 if (!isAudio) {
                     await consumer.requestKeyFrame();
-                }
-
-                // Gives the encoder a real window to prove it's keeping up before committing to
-                // this attempt — has to run AFTER resume()/requestKeyFrame() above, since nothing
-                // flows (and so the stall signal can't appear) until then.
-                if (!isAudio) {
-                    await new Promise((resolve) => setTimeout(resolve, RecordingService.STALL_CHECK_MS));
-                }
-                ffmpeg.stderr?.removeListener('data', onStallSignal);
-                if (stalled) {
-                    throw new Error(`ffmpeg (${info.source} ${info.producerId}) fell behind consuming RTP (CPU-starved) — retrying`);
                 }
 
                 const dbId = randomUUID();
@@ -532,11 +474,13 @@ export class RecordingService {
 
                 // Audio has no thumbnail concept — only schedule this for video sources.
                 if (!isAudio) {
-                    // Grace period comfortably after the first forced-keyframe fragment flush (2s
-                    // interval, see the -force_key_frames comment above) so there's actually something
-                    // in the temp file to extract a frame from. Re-reads the live map by dbId at fire
-                    // time rather than tracking a cancelable timer handle — a session that's since
-                    // stopped or been replaced simply won't match, and generateFinalThumbnail covers it.
+                    // Grace period so there's actually a keyframe in the temp file to extract a
+                    // frame from — with -c copy the browser's own encoder decides keyframe timing
+                    // (see consumer.requestKeyFrame() above), not a forced interval, so this is a
+                    // generous cushion rather than tuned to a known cadence. Re-reads the live map
+                    // by dbId at fire time rather than tracking a cancelable timer handle — a
+                    // session that's since stopped or been replaced simply won't match, and
+                    // generateFinalThumbnail covers it.
                     const GRACE_MS = 3000;
                     setTimeout(() => {
                         const current = state.videoSessions.get(info.producerId);
@@ -556,11 +500,11 @@ export class RecordingService {
                 if (sdpPath) {
                     void fs.unlink(sdpPath).catch(() => undefined);
                 }
-                // A stall-detected retry (unlike every other failure here) leaves a live ffmpeg
-                // process still running — kill it before the next attempt, both so it stops
-                // holding destPort at the OS level (our releasePort() above only frees our own
-                // bookkeeping) and because ffmpeg's `-n` flag refuses to overwrite the temp
-                // output path a retry would reuse, so that file must go too.
+                // If ffmpeg already spawned successfully but a later step (consumer.resume(),
+                // requestKeyFrame()) rejected, it's still running and would otherwise leak — kill
+                // it before the next attempt, both so it stops holding destPort at the OS level
+                // (our releasePort() above only frees our own bookkeeping) and because ffmpeg's
+                // `-n` flag refuses to overwrite the temp output path a retry would reuse.
                 if (ffmpeg && ffmpeg.exitCode === null && ffmpeg.signalCode === null) {
                     ffmpeg.kill('SIGKILL');
                 }
@@ -573,68 +517,43 @@ export class RecordingService {
         throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
-    /** Pulled out of startVideoSession as its own pure function so the audio-vs-video branch is
-     *  directly unit-testable without spinning up a real mediasoup Router/ffmpeg process. */
-    private buildRecordingFfmpegArgs(isAudio: boolean, sdpPath: string, tempOutputPath: string): string[] {
-        const codecArgs = isAudio
-            ? ['-c:a', 'aac', '-b:a', '128k']
-            : [
-                  '-c:v',
-                  'libx264',
-                  // ultrafast, not veryfast — every additional simultaneous video recording
-                  // (webcam/screen, each its own real-time libx264 encode) meaningfully adds to
-                  // total CPU demand; a session with several concurrent video streams starting
-                  // together can starve one or more of them badly enough that they never
-                  // encode a single usable frame (confirmed via a real incident: RTP packets
-                  // piling up "max delay reached"/"missed N packets" until the temp file was
-                  // still completely empty when the stream stopped). ultrafast trades some
-                  // compression efficiency for meaningfully lower CPU per encode.
-                  '-preset',
-                  'ultrafast',
-                  // Disables B-frames/lookahead buffering — without this, x264 can hold several
-                  // frames internally before any encoded output is available to write at all,
-                  // regardless of forced keyframe timing. A stream stopped within that first
-                  // ~second could flush nothing even with a keyframe forced at t=0.
-                  '-tune',
-                  'zerolatency',
-                  // Forces a keyframe (and therefore a flushed fragment, since frag_keyframe
-                  // below fragments AT each keyframe) every 2s starting at t=0 — without this,
-                  // libx264's default ~8-10s keyframe interval means a stream stopped shortly
-                  // after starting can flush nothing at all (moov atom not found).
-                  '-force_key_frames',
-                  'expr:gte(t,n_forced*2)',
-                  // Pins the OUTPUT to a real, fixed frame rate — the other half of the
-                  // duplicate-frame/bogus-duration fix below. Without this, ffmpeg still has to
-                  // guess an output cadence from the (now wall-clock) input timestamps.
-                  '-r',
-                  '30',
-                  '-fps_mode',
-                  'cfr',
-              ];
-        // Audio has no keyframe concept — fragment after literally every AAC frame (~21ms)
-        // rather than on a timer, so even a mic on for under a second still flushes something
-        // valid instead of an empty/unremuxable temp file.
-        const movflags = isAudio ? '+frag_every_frame+empty_moov+faststart' : '+frag_keyframe+empty_moov+faststart';
+    /** Pulled out of startVideoSession as its own pure function so it's directly unit-testable
+     *  without spinning up a real mediasoup Router/ffmpeg process.
+     *
+     *  Stream-copies (`-c copy`) rather than transcodes: mediasoup only ever negotiates VP8
+     *  (video) + Opus (audio) — see room.service.ts's MEDIA_CODECS — so the RTP arriving here is
+     *  already a directly browser-playable codec pair. There's nothing to re-encode, which is
+     *  also why there's no separate audio/video arg branch anymore (both are just `-c copy` into
+     *  a `.webm` — VP8/Opus's own native container). This is a straight passthrough of whatever
+     *  quality the sending browser's own encoder chose, instead of the previous decode-and-
+     *  re-encode-at-ultrafast pipeline, which was both the CPU cost behind repeated recording
+     *  corruption and a real (if secondary) quality loss on its own.
+     *
+     *  No mp4-style `empty_moov`/`faststart` equivalent is needed for the live-write output:
+     *  Matroska (WebM's container format) writes self-contained clusters as it goes, starting a
+     *  new one at each keyframe by format requirement, so an abruptly-killed temp file stays
+     *  valid/playable up to its last complete cluster with no special flags — see
+     *  remuxToFinalFile for why a second pass still matters for proper seeking. */
+    private buildRecordingFfmpegArgs(sdpPath: string, tempOutputPath: string): string[] {
         return [
             '-n',
             '-protocol_whitelist',
             'file,udp,rtp',
-            // Without this, ffmpeg trusts the RTP stream's raw clock timestamps as-is, which
-            // (combined with no explicit output frame rate for video) led it to infer a bogus
-            // output cadence and pad in duplicate frames/mis-derive the container duration
-            // (players then show 0:00/no scrubber, since that IS the file's real declared
-            // duration). Wall-clock timestamps reflect when packets actually arrived instead.
+            // Without this, ffmpeg trusts the RTP stream's raw clock timestamps as-is, which can
+            // have jitter/discontinuities — wall-clock timestamps (when packets actually arrived)
+            // give a correct container duration/playback timing instead. Unrelated to the
+            // transcode-vs-copy decision, still needed either way.
             '-use_wallclock_as_timestamps',
             '1',
             '-i',
             sdpPath,
-            ...codecArgs,
-            // empty_moov means this recording target has no upfront duration index — needed for
-            // resilience against an abrupt kill, but it's why players show 0:00/no scrubber.
-            // finalizeVideoSession remuxes this temp file into a normal indexed mp4 once the
-            // stream stops, which is what actually gets kept.
-            '-movflags',
-            movflags,
+            '-c',
+            'copy',
+            // Minimizes how much data sits in ffmpeg's userspace I/O buffer rather than being
+            // handed to the OS — narrows the loss window on an abrupt SIGKILL. Cheap now that
+            // there's no libx264 CPU cost competing for cycles.
+            '-flush_packets',
+            '1',
             tempOutputPath,
         ];
     }
@@ -680,12 +599,12 @@ export class RecordingService {
     }
 
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
-        // Finalizes whatever's still open, AND waits for anything already finalizing in the
-        // background from an earlier individual stream stop (see pendingFinalizations). Routed
-        // through enqueueOp() (not called directly) so every open session's ffmpeg gets its
-        // graceful-quit signal staggered instead of all at once — see that method's comment.
+        // Finalizes whatever's still open, concurrently, AND waits for anything already
+        // finalizing in the background from an earlier individual stream stop (see
+        // pendingFinalizations) — each finalize is just a graceful ffmpeg quit plus a cheap
+        // -c copy remux, so there's no CPU contention to stagger against.
         await Promise.all([
-            ...[...state.videoSessions.values()].map((session) => this.enqueueOp(state, () => this.finalizeVideoSession(state, session))),
+            ...[...state.videoSessions.values()].map((session) => this.finalizeVideoSession(state, session)),
             ...state.pendingFinalizations,
         ]);
     }
@@ -741,14 +660,15 @@ export class RecordingService {
     }
 
     /**
-     * The live recording writes to a temp fragmented mp4 (empty_moov — no
-     * upfront duration index, but resilient to an abrupt kill). Once that
-     * process has exited, this does a fast `-c copy` remux into the real,
-     * final path WITHOUT empty_moov — a normal mp4 with correct top-level
-     * duration/seek metadata, since ffmpeg's demuxer can read the fragmented
-     * temp file's actual total duration even though it has no central index.
-     * Best-effort: logs and keeps the temp file (rather than throwing) if the
-     * remux itself fails, so a stop/close action never fails because of this.
+     * The live recording writes to a temp WebM file (see buildRecordingFfmpegArgs — clusters are
+     * self-contained as they're written, but the Cues seek index and final Segment
+     * duration/size only ever get written at trailer time, which only runs on a clean exit).
+     * Once that process has exited, this does a fast `-c copy` remux into the real, final path —
+     * on a clean stop this is close to a no-op (the temp file likely already has a reasonable
+     * trailer), but on an abrupt SIGKILL (a retry, or stopFfmpegGracefully's 5s-timeout fallback)
+     * the temp file's trailer never ran at all, and this is the only place a proper Cues
+     * index/duration ever gets built for it. Best-effort: logs and keeps the temp file (rather
+     * than throwing) if the remux itself fails, so a stop/close action never fails because of this.
      *
      * Returns whether a real, playable final file actually exists now — callers use this to set
      * Recording.hasContent. A producer that never emitted a keyframe (a separate, already-diagnosed
@@ -765,10 +685,7 @@ export class RecordingService {
                 this.logger.warn(`Recording temp file ${tempPath} is missing or empty — nothing to remux`);
                 return false;
             }
-            await this.runFfmpegToCompletion(
-                ['-y', '-i', tempPath, '-c', 'copy', '-movflags', '+faststart', finalPath],
-                `remux ${path.basename(finalPath)}`,
-            );
+            await this.runFfmpegToCompletion(['-y', '-i', tempPath, '-c', 'copy', finalPath], `remux ${path.basename(finalPath)}`);
             void fs.unlink(tempPath).catch(() => undefined);
             return true;
         } catch (error) {
@@ -866,7 +783,7 @@ export class RecordingService {
     }
 
     private tempRecordingPath(finalPath: string): string {
-        return finalPath.replace(/\.mp4$/, '.recording.mp4');
+        return finalPath.replace(/\.webm$/, '.recording.webm');
     }
 
     /** Runs ffmpeg on a finite local-file input to completion (unlike spawnFfmpegAndWaitReady, which is for live RTP input and never awaits full completion).
@@ -995,7 +912,7 @@ export class RecordingService {
      *  per connection, unlike streamNumber (which resets to 1 independently for each peer). */
     private buildFilename(roomName: string, username: string, streamType: string, streamNumber: number, timestamp: string, peerId?: string): string {
         const peerSegment = peerId ? `-${this.sanitizeKebab(peerId)}` : '';
-        return `${this.sanitize(roomName)}-${this.sanitize(username)}${peerSegment}-${timestamp}-${streamType}-${streamNumber}.mp4`;
+        return `${this.sanitize(roomName)}-${this.sanitize(username)}${peerSegment}-${timestamp}-${streamType}-${streamNumber}.webm`;
     }
 
     private sanitize(value: string): string {
