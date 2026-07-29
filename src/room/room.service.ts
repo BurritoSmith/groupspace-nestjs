@@ -124,7 +124,7 @@ export class RoomService implements OnModuleInit {
         userId: string,
         displayName: string,
         pictureUrl: string,
-    ): Promise<Omit<IJoinRoomResult, 'iceServers' | 'userId' | 'chatHistory' | 'hasMoreChatHistory'>> {
+    ): Promise<Omit<IJoinRoomResult, 'iceServers' | 'userId' | 'chatHistory' | 'hasMoreChatHistory' | 'userSettings'>> {
         const router = await this.getOrCreateRouter(roomName);
         const peers: IPeerSummary[] = [];
         const existingProducers: IProducerSummary[] = [];

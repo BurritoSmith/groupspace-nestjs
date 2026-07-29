@@ -18,6 +18,26 @@ model User {
 
   chatMessages ChatMessage[]
   recordings   Recording[]
+  settings     UserSetting[]
+}
+
+// Generic per-user preference storage — every user setting (starting with the microphone
+// threshold) lives here as one row, keyed by an app-defined `key` string plus an optional
+// `deviceId` for hardware-scoped settings. New settings need no schema change, just a new key.
+model UserSetting {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  key       String
+  // Defaults to "" (not nullable) rather than allowing null — Postgres treats multiple NULLs as
+  // distinct within a unique index, which would silently break the @@unique guarantee below for
+  // a future non-device-scoped setting (deviceId "not applicable").
+  deviceId  String   @default("")
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, key, deviceId])
+  @@index([userId])
 }
 
 model Room {

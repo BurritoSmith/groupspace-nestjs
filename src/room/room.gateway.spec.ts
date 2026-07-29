@@ -6,17 +6,20 @@ describe('RoomGateway', () => {
     let toSpy: jest.Mock;
     let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock };
     let fakeChatService: { saveMessage: jest.Mock };
+    let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
         fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn() };
         fakeChatService = { saveMessage: jest.fn() };
+        fakeUserSettingsService = { save: jest.fn().mockResolvedValue(undefined), getAll: jest.fn().mockResolvedValue([]) };
         gateway = new RoomGateway(
             fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
             {} as never, // googleAuthService
             fakeEventEmitter as never, // recordingService
             {} as never, // usersService
+            fakeUserSettingsService as never, // userSettingsService
             fakeChatService as never, // chatService
             {} as never, // sessionService
         );
@@ -133,6 +136,38 @@ describe('RoomGateway', () => {
             gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), { text: 'hello' });
 
             expect(emitSpy).toHaveBeenCalledWith('chat-message', expect.objectContaining({ pictureUrl: '' }));
+        });
+    });
+
+    describe('onSaveUserSetting', () => {
+        it("saves via UserSettingsService using the userId from socket.data, and acks {ok: true}", async () => {
+            const result = await gateway.onSaveUserSetting(fakeSocket({ userId: 'user-1' }), {
+                key: 'mic-threshold',
+                deviceId: 'device-1',
+                value: 30,
+            });
+
+            expect(fakeUserSettingsService.save).toHaveBeenCalledWith('user-1', 'mic-threshold', 'device-1', 30);
+            expect(result).toEqual({ ok: true });
+        });
+
+        it('acks {ok: false} without touching the service when the socket has no userId (not signed in)', async () => {
+            const result = await gateway.onSaveUserSetting(fakeSocket({}), { key: 'mic-threshold', deviceId: 'device-1', value: 30 });
+
+            expect(fakeUserSettingsService.save).not.toHaveBeenCalled();
+            expect(result).toEqual({ ok: false, error: 'Not signed in.' });
+        });
+
+        it('acks {ok: false, error} instead of throwing when the service rejects', async () => {
+            fakeUserSettingsService.save.mockRejectedValue(new Error('DB unavailable'));
+
+            const result = await gateway.onSaveUserSetting(fakeSocket({ userId: 'user-1' }), {
+                key: 'mic-threshold',
+                deviceId: 'device-1',
+                value: 30,
+            });
+
+            expect(result).toEqual({ ok: false, error: 'DB unavailable' });
         });
     });
 
