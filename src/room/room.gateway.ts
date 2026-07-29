@@ -9,6 +9,7 @@ import {
     WsException,
 } from '@nestjs/websockets';
 import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { Server, Socket } from 'socket.io';
 import { getAllowedOrigins } from '../config/cors-origins';
 import { ChatService, HISTORY_PAGE_SIZE } from './chat.service';
@@ -18,6 +19,7 @@ import { RoomService } from './room.service';
 import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
 import { UsersService } from './users.service';
+import { UserSettingsService } from './user-settings.service';
 import type {
     IChatMessage,
     IChatMessagePayload,
@@ -28,6 +30,7 @@ import type {
     IJoinRoomPayload,
     IProducePayload,
     IResumeConsumerPayload,
+    ISaveUserSettingPayload,
     ISetConsumerQualityPayload,
 } from './interfaces/room.interfaces';
 
@@ -51,6 +54,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         private readonly googleAuthService: GoogleAuthService,
         private readonly recordingService: RecordingService,
         private readonly usersService: UsersService,
+        private readonly userSettingsService: UserSettingsService,
         private readonly chatService: ChatService,
         private readonly sessionService: SessionService,
     ) {
@@ -214,6 +218,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         socket.to(roomName).emit('peer-joined', { peerId: socket.id, userId, displayName, pictureUrl, micSelfMuted: false });
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
+        const userSettings = await this.userSettingsService.getAll(userId);
         return {
             ...result,
             userId,
@@ -221,6 +226,7 @@ export class RoomGateway implements OnGatewayDisconnect {
             chatHistory,
             hasMoreChatHistory: chatHistory.length === HISTORY_PAGE_SIZE,
             iceServers: turnCredentials ? [turnCredentials] : [],
+            userSettings,
         };
     }
 
@@ -421,6 +427,24 @@ export class RoomGateway implements OnGatewayDisconnect {
             return;
         }
         socket.to(result.roomName).emit('mic-mute-changed', { peerId: socket.id, muted: payload.muted });
+    }
+
+    /** Generic per-user setting save — one handler for every settings key (starting with the
+     *  microphone threshold, `deviceId`-scoped), so a future setting needs no new gateway code.
+     *  Never throws: an unauthenticated/expected failure comes back as {ok:false, error} — a
+     *  thrown WsException never fills the caller's ack callback, only a real return value does. */
+    @SubscribeMessage('save-user-setting')
+    async onSaveUserSetting(@ConnectedSocket() socket: Socket, @MessageBody() payload: ISaveUserSettingPayload) {
+        const userId = socket.data.userId as string | undefined;
+        if (!userId) {
+            return { ok: false, error: 'Not signed in.' };
+        }
+        try {
+            await this.userSettingsService.save(userId, payload.key, payload.deviceId, payload.value as Prisma.InputJsonValue);
+            return { ok: true };
+        } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : 'Failed to save setting' };
+        }
     }
 
     @SubscribeMessage('load-earlier-chat-messages')

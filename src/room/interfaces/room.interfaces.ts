@@ -59,6 +59,23 @@ export interface IJoinRoomResult {
     // client compute the true elapsed time instead of starting its timer at 00:00. Mirrors the
     // same 'recording-state' broadcast field (see RecordingService.getRecordingStartedAt()).
     recordingStartedAt: string | null;
+    // Every saved setting for this user, regardless of room — settings are per-user, not
+    // per-room, so this doesn't vary by roomName. See UserSettingsService/ISaveUserSettingPayload.
+    userSettings: IUserSettingRecord[];
+}
+
+export interface IUserSettingRecord {
+    key: string;
+    deviceId: string;
+    value: unknown;
+}
+
+export interface ISaveUserSettingPayload {
+    key: string;
+    // '' for a setting that isn't scoped to a specific hardware device — see UserSetting.deviceId's
+    // schema comment for why this is a non-null default rather than an optional/nullable field.
+    deviceId: string;
+    value: unknown;
 }
 
 export interface ICreateTransportPayload {

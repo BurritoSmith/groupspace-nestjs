@@ -8,6 +8,7 @@ import { RoomService } from './room.service';
 import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
 import { UsersService } from './users.service';
+import { UserSettingsService } from './user-settings.service';
 
 @Module({
     imports: [
@@ -34,6 +35,7 @@ import { UsersService } from './users.service';
         GoogleAuthService,
         RecordingService,
         UsersService,
+        UserSettingsService,
         ChatService,
         SessionService,
     ],
