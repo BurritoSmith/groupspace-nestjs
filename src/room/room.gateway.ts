@@ -210,6 +210,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         socket.data.roomName = roomName;
         socket.data.displayName = displayName;
         socket.data.userId = userId;
+        socket.data.pictureUrl = pictureUrl;
         socket.to(roomName).emit('peer-joined', { peerId: socket.id, userId, displayName, pictureUrl, micSelfMuted: false });
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
@@ -382,11 +383,12 @@ export class RoomGateway implements OnGatewayDisconnect {
             id: randomUUID(), // generated here so the broadcast doesn't wait on the DB insert
             userId,
             displayName: socket.data.displayName ?? 'Anonymous',
+            pictureUrl: (socket.data.pictureUrl as string | undefined) ?? '',
             text: payload.text.trim(),
             at: new Date().toISOString(),
         };
         this.server.to(roomName).emit('chat-message', message);
-        this.chatService.saveMessage(message.id, roomName, userId, message.displayName, message.text, new Date(message.at));
+        this.chatService.saveMessage(message.id, roomName, userId, message.displayName, message.pictureUrl, message.text, new Date(message.at));
     }
 
     /** Purely ephemeral — no persistence, no ack. socket.to() (not this.server.to()) so the

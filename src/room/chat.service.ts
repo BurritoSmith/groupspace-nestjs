@@ -10,7 +10,7 @@ export class ChatService {
     constructor(private readonly prisma: PrismaService) {}
 
     /** Fire-and-forget from the gateway — a slow/failed DB write must never delay real-time delivery. */
-    saveMessage(id: string, roomName: string, userId: string, displayName: string, text: string, sentAt: Date): void {
+    saveMessage(id: string, roomName: string, userId: string, displayName: string, pictureUrl: string, text: string, sentAt: Date): void {
         void this.prisma.chatMessage
             .create({
                 data: {
@@ -18,6 +18,7 @@ export class ChatService {
                     room: { connectOrCreate: { where: { name: roomName }, create: { name: roomName } } },
                     user: { connect: { id: userId } },
                     displayName,
+                    pictureUrl: pictureUrl || null,
                     text,
                     sentAt,
                 },
@@ -41,6 +42,7 @@ export class ChatService {
             id: row.id,
             userId: row.userId,
             displayName: row.displayName,
+            pictureUrl: row.pictureUrl ?? '',
             text: row.text,
             at: row.sentAt.toISOString(),
         }));

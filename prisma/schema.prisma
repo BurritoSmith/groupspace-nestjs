@@ -54,6 +54,10 @@ model ChatMessage {
   userId      String
   user        User     @relation(fields: [userId], references: [id])
   displayName String // snapshot at send-time — a later Google account rename must not rewrite history
+  pictureUrl  String? // snapshot at send-time, same reasoning as displayName — also lets a message from a
+  // peer who has since left the room still show their avatar, instead of only ever resolving it through the
+  // live presence roster. Nullable: a Google account with no profile photo genuinely has nothing to snapshot;
+  // the frontend falls back to a generic person icon either way.
   text        String
   sentAt      DateTime @default(now())
 
