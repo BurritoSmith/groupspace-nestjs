@@ -330,6 +330,16 @@ export class RoomGateway implements OnGatewayDisconnect {
         } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : 'Failed to start recording.' };
         }
+        // onJoinRoom's own join-logging only fires for someone joining/rejoining WHILE a
+        // recording is already active — the common case (record a room that's already
+        // populated) would otherwise never log anyone at all. Snapshot everyone present the
+        // instant recording starts as a 'join' event instead.
+        const activeSessionId = this.recordingService.getActiveSessionId(roomName);
+        if (activeSessionId) {
+            for (const peer of this.roomService.getPeersInRoom(roomName)) {
+                this.recordingService.logEvent(activeSessionId, 'join', peer.peerId, peer.userId, peer.displayName);
+            }
+        }
         return { ok: true };
     }
 

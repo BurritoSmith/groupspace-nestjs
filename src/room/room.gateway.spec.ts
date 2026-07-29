@@ -215,6 +215,56 @@ describe('RoomGateway', () => {
         });
     });
 
+    describe('onStartRecording — join-event snapshot', () => {
+        function buildGateway() {
+            const localRoomService = {
+                events: { on: jest.fn() },
+                getRecordingSnapshot: jest.fn().mockReturnValue({ router: {}, producers: [] }),
+                getPeersInRoom: jest.fn().mockReturnValue([
+                    { peerId: 'peer-1', userId: 'user-1', displayName: 'Alice' },
+                    { peerId: 'peer-2', userId: 'user-2', displayName: 'Bob' },
+                ]),
+            };
+            const fakeRecordingService = {
+                events: { on: jest.fn() },
+                start: jest.fn().mockResolvedValue(undefined),
+                getActiveSessionId: jest.fn().mockReturnValue('session-1'),
+                logEvent: jest.fn(),
+            };
+            const localGateway = new RoomGateway(
+                localRoomService as never,
+                {} as never,
+                {} as never,
+                fakeRecordingService as never,
+                {} as never,
+                fakeUserSettingsService as never,
+                fakeChatService as never,
+                {} as never,
+            );
+            return { localGateway, localRoomService, fakeRecordingService };
+        }
+
+        it("logs a 'join' event for every peer already in the room the instant recording starts", async () => {
+            const { localGateway, fakeRecordingService } = buildGateway();
+
+            const result = await localGateway.onStartRecording(fakeSocket({ roomName: 'lobby' }));
+
+            expect(result).toEqual({ ok: true });
+            expect(fakeRecordingService.logEvent).toHaveBeenCalledWith('session-1', 'join', 'peer-1', 'user-1', 'Alice');
+            expect(fakeRecordingService.logEvent).toHaveBeenCalledWith('session-1', 'join', 'peer-2', 'user-2', 'Bob');
+            expect(fakeRecordingService.logEvent).toHaveBeenCalledTimes(2);
+        });
+
+        it('does not log anything when starting fails (no active session to attribute events to)', async () => {
+            const { localGateway, fakeRecordingService } = buildGateway();
+            fakeRecordingService.getActiveSessionId.mockReturnValue(null);
+
+            await localGateway.onStartRecording(fakeSocket({ roomName: 'lobby' }));
+
+            expect(fakeRecordingService.logEvent).not.toHaveBeenCalled();
+        });
+    });
+
     describe('onGetRecordingSession', () => {
         it('merges chatHistory (fetched via ChatService, scoped to the session window) into the returned session', async () => {
             const session = {

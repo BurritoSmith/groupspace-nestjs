@@ -63,6 +63,42 @@ describe('RoomService', () => {
         });
     });
 
+    describe('getPeersInRoom', () => {
+        function seedPeer(peerId: string, roomName: string, userId: string, displayName: string): void {
+            const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
+            peers.set(peerId, {
+                peerId,
+                userId,
+                displayName,
+                pictureUrl: '',
+                micSelfMuted: false,
+                roomName,
+                router: {} as never,
+                sendTransport: null,
+                recvTransport: null,
+                producers: new Map(),
+                consumers: new Map(),
+            });
+        }
+
+        it('returns one entry per peer currently in the given room, regardless of producers', () => {
+            seedPeer('peer-1', 'lobby', 'user-1', 'Clay');
+            seedPeer('peer-2', 'lobby', 'user-2', 'Alex');
+            seedPeer('peer-3', 'other-room', 'user-3', 'Someone Else');
+
+            const result = service.getPeersInRoom('lobby');
+
+            expect(result).toEqual([
+                { peerId: 'peer-1', userId: 'user-1', displayName: 'Clay' },
+                { peerId: 'peer-2', userId: 'user-2', displayName: 'Alex' },
+            ]);
+        });
+
+        it('returns an empty array for a room with no peers', () => {
+            expect(service.getPeersInRoom('empty-room')).toEqual([]);
+        });
+    });
+
     describe('consume', () => {
         function seedConsumingPeer(consumeMock: jest.Mock): void {
             const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
