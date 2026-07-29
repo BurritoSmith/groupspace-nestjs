@@ -57,9 +57,12 @@ export class RoomGateway implements OnGatewayDisconnect {
         this.roomService.events.on('active-speakers', ({ roomName, peerIds }: { roomName: string; peerIds: string[] }) => {
             this.server.to(roomName).emit('active-speakers', { peerIds });
         });
-        this.recordingService.events.on('recording-state', ({ roomName, isRecording }: { roomName: string; isRecording: boolean }) => {
-            this.server.to(roomName).emit('recording-state', { isRecording });
-        });
+        this.recordingService.events.on(
+            'recording-state',
+            ({ roomName, isRecording, startedAt }: { roomName: string; isRecording: boolean; startedAt: string | null }) => {
+                this.server.to(roomName).emit('recording-state', { isRecording, startedAt });
+            },
+        );
         // Fan-out for the playback page's progressive-availability UI — a bare broadcast room per
         // recording session, joined via subscribe-recording-session below. Unlike the video-call
         // room, there's no application-level state tied to membership here, so no disconnect

@@ -171,6 +171,7 @@ export class RoomService implements OnModuleInit {
             peers,
             existingProducers,
             isRecording: this.recordingService.isRecording(roomName),
+            recordingStartedAt: this.recordingService.getRecordingStartedAt(roomName)?.toISOString() ?? null,
         };
     }
 
