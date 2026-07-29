@@ -88,6 +88,17 @@ export interface IResumeConsumerPayload {
     consumerId: string;
 }
 
+// 'low'/'high' rather than a raw spatial-layer index — the client doesn't need to know each
+// producer's actual simulcast layer count (webcam and screen share differ), the server resolves
+// the semantic tier to the right index against the producer's own negotiated encodings. See
+// RoomService.setConsumerQuality().
+export type ConsumerQuality = 'low' | 'high';
+
+export interface ISetConsumerQualityPayload {
+    consumerId: string;
+    quality: ConsumerQuality;
+}
+
 export interface ICloseProducerPayload {
     producerId: string;
 }
