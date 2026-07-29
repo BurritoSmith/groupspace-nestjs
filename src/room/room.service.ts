@@ -380,17 +380,6 @@ export class RoomService implements OnModuleInit {
         return { roomName: peer.roomName, displayName: peer.displayName, userId: peer.userId, removedProducerIds };
     }
 
-    /** Every peer currently in the room, one entry each regardless of how many (if any)
-     *  producers they have — used to log a 'join' RecordingEvent for everyone already present
-     *  the moment a recording starts (see RoomGateway.onStartRecording), since onJoinRoom's own
-     *  join-logging only fires for someone joining/rejoining WHILE a recording is already
-     *  active, not for the common case of starting to record a room that's already populated. */
-    getPeersInRoom(roomName: string): { peerId: string; userId: string; displayName: string }[] {
-        return [...this.peers.values()]
-            .filter((peer) => peer.roomName === roomName)
-            .map((peer) => ({ peerId: peer.peerId, userId: peer.userId, displayName: peer.displayName }));
-    }
-
     /** Snapshot of a room's router + every currently active producer, handed to RecordingService.start(). */
     getRecordingSnapshot(roomName: string): IRecordingSnapshot | null {
         const router = this.routersByRoom.get(roomName);

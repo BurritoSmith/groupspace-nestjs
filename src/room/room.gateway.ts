@@ -168,10 +168,6 @@ export class RoomGateway implements OnGatewayDisconnect {
             socket.to(closed.roomName).emit('producer-closed', { producerId });
         }
         socket.to(closed.roomName).emit('peer-left', { peerId: socket.id, displayName: closed.displayName });
-        const activeSessionId = this.recordingService.getActiveSessionId(closed.roomName);
-        if (activeSessionId) {
-            this.recordingService.logEvent(activeSessionId, 'leave', socket.id, closed.userId, closed.displayName);
-        }
         // No-op on a socket that's already disconnecting; matters for the still-connected
         // leave-room path so a later join-room on this same socket starts from a clean slate.
         void socket.leave(closed.roomName);
@@ -220,10 +216,6 @@ export class RoomGateway implements OnGatewayDisconnect {
         socket.data.userId = userId;
         socket.data.pictureUrl = pictureUrl;
         socket.to(roomName).emit('peer-joined', { peerId: socket.id, userId, displayName, pictureUrl, micSelfMuted: false });
-        const activeSessionId = this.recordingService.getActiveSessionId(roomName);
-        if (activeSessionId) {
-            this.recordingService.logEvent(activeSessionId, 'join', socket.id, userId, displayName);
-        }
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
         const userSettings = await this.userSettingsService.getAll(userId);
@@ -330,16 +322,11 @@ export class RoomGateway implements OnGatewayDisconnect {
         } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : 'Failed to start recording.' };
         }
-        // onJoinRoom's own join-logging only fires for someone joining/rejoining WHILE a
-        // recording is already active — the common case (record a room that's already
-        // populated) would otherwise never log anyone at all. Snapshot everyone present the
-        // instant recording starts as a 'join' event instead.
-        const activeSessionId = this.recordingService.getActiveSessionId(roomName);
-        if (activeSessionId) {
-            for (const peer of this.roomService.getPeersInRoom(roomName)) {
-                this.recordingService.logEvent(activeSessionId, 'join', peer.peerId, peer.userId, peer.displayName);
-            }
-        }
+        // Deliberately does NOT log a 'join' event for whoever's already in the room — join/leave
+        // events are now derived from mic producer start/stop (see RecordingService
+        // .notifyProducerCreated/.notifyProducerClosing), which naturally excludes anyone already
+        // producing when recording starts (that goes through start()'s own snapshot path, never
+        // notifyProducerCreated) and naturally covers every later join/leave, however many times.
         return { ok: true };
     }
 

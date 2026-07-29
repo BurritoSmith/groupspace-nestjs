@@ -19,6 +19,7 @@ export interface IRecordingSnapshot {
 export interface IRecordingVideoSession {
     producerId: string;
     peerId: string;
+    userId: string | null;
     displayName: string;
     // Widened to the full StreamSource (webcam/screen/mic) now that mic producers are recorded
     // through this same one-producer-one-session pipeline instead of a separate mixed track.

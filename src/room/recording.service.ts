@@ -83,16 +83,10 @@ export class RecordingService {
         return this.rooms.get(roomName)?.startedAt ?? null;
     }
 
-    /** The DB id of the room's currently-active recording session, or null if it isn't recording
-     *  — used by RoomGateway to decide whether/where to log a join/leave RecordingEvent. */
-    getActiveSessionId(roomName: string): string | null {
-        return this.rooms.get(roomName)?.sessionDbId ?? null;
-    }
-
     /** Fire-and-forget, matching ChatService.saveMessage's convention — a slow/failed write must
      *  never delay the join/leave flow it's called from. Only ever called while a recording is
-     *  actually active for the room (see RoomGateway's onJoinRoom/cleanupPeer). */
-    logEvent(sessionId: string, type: 'join' | 'leave', peerId: string, userId: string | null, displayName: string): void {
+     *  actually active for the room (see notifyProducerCreated/notifyProducerClosing). */
+    private logEvent(sessionId: string, type: 'join' | 'leave', peerId: string, userId: string | null, displayName: string): void {
         this.prisma.recordingEvent
             .create({ data: { sessionId, type, peerId, userId, displayName } })
             .catch((error: unknown) => this.logger.error(`Failed to log ${type} event for recording session ${sessionId}: ${error}`));
@@ -324,11 +318,23 @@ export class RecordingService {
     }
 
     /** Fire-and-forget hook for a newly created producer — webcam, screen, or mic, each gets its
-     *  own fully independent recording session. No-op if the room isn't being recorded. */
+     *  own fully independent recording session. No-op if the room isn't being recorded.
+     *
+     *  A mic producer specifically also logs a 'join' timeline event — this is the ONLY path that
+     *  does, deliberately: it's reached exclusively for a producer created WHILE a recording is
+     *  already running (start()'s own initial-snapshot producers go straight to startVideoSession,
+     *  never through here), so it naturally excludes anyone already on a live mic when recording
+     *  begins and naturally covers every later join, however many times someone joins over the
+     *  session's lifetime. Mic start/stop is also exactly the frontend's own MediaRoom.startMic()/
+     *  stopMic() — i.e. "joined/left the call" — regardless of self-mute state (a muted mic still
+     *  produces a silent track, so the producer/recording still exists). */
     notifyProducerCreated(roomName: string, router: mediasoupTypes.Router, producer: IRecordingProducerInfo): void {
         const state = this.rooms.get(roomName);
         if (!state) {
             return;
+        }
+        if (producer.source === 'mic') {
+            this.logEvent(state.sessionDbId, 'join', producer.peerId, producer.userId, producer.displayName);
         }
         void this.enqueueStart(state, () => this.startVideoSession(state, router, producer)).catch((error: unknown) =>
             this.logger.error(`Failed to start recording ${producer.source} producer ${producer.producerId} in room ${roomName}: ${error}`),
@@ -379,12 +385,16 @@ export class RecordingService {
     /** Fire-and-forget hook for a closing producer — webcam, screen, or mic. No-op if there's no
      *  recording session for it. Registers the finalization in state.pendingFinalizations so a
      *  concurrent stop() (e.g. "stop all streams" closing several producers immediately before
-     *  stopping the recording) waits for it instead of racing ahead — see that field's comment. */
+     *  stopping the recording) waits for it instead of racing ahead — see that field's comment.
+     *  Mirrors notifyProducerCreated's 'join' logging — a mic producer closing is "left the call". */
     notifyProducerClosing(roomName: string, producerId: string): void {
         const state = this.rooms.get(roomName);
         const session = state?.videoSessions.get(producerId);
         if (!state || !session) {
             return;
+        }
+        if (session.source === 'mic') {
+            this.logEvent(state.sessionDbId, 'leave', session.peerId, session.userId, session.displayName);
         }
         state.videoSessions.delete(producerId);
         const finalizing = this.enqueueStop(state, () => this.finalizeVideoSession(state, session)).catch((error: unknown) =>
@@ -484,6 +494,7 @@ export class RecordingService {
                 state.videoSessions.set(info.producerId, {
                     producerId: info.producerId,
                     peerId: info.peerId,
+                    userId: info.userId,
                     displayName: info.displayName,
                     source: info.source,
                     transport,
