@@ -127,16 +127,15 @@ export interface IRoomRecordingState {
     // videoSessions (see notifyProducerClosing), so without this its still-in-flight ffmpeg
     // stop/remux could lose the race against the recording session being marked stopped.
     pendingFinalizations: Set<Promise<void>>;
-    // Serializes startVideoSession() calls for this room so concurrent producer starts (e.g. a
-    // user's webcam+screen+mic all negotiating at once, or several users starting near-simultaneously)
-    // don't all spawn CPU-heavy ffmpeg encoders in the same instant — see RecordingService.enqueueStart().
-    // A promise chain, not a counter/lock, so callers just await their own link and one start's
-    // rejection can't jam the queue for the rest.
-    startQueue: Promise<void>;
-    // Same pattern as startQueue, for finalizeVideoSession() calls — stopping a session with
-    // several active streams (or "stop all streams" closing several producers at once) used to
-    // finalize every one of them concurrently via Promise.all, which could pile just as much
-    // simultaneous CPU-heavy ffmpeg work onto stop as an unstaggered start could. See
-    // RecordingService.enqueueStop().
-    stopQueue: Promise<void>;
+    // Serializes EVERY startVideoSession()/finalizeVideoSession() call for this room onto one
+    // shared FIFO chain — not just starts against starts (several producers negotiating close
+    // together) or stops against stops ("stop all streams" closing several producers at once),
+    // but starts against stops too: a stream stopping (finalize's own ffmpeg remux) and a
+    // different stream starting (a fresh live encoder) used to run on independent queues and
+    // could pile onto the CPU at the same instant, which is exactly what corrupted a rejoining
+    // participant's mic recording (hasContent: false, no keyframe/audio frame captured) when
+    // their leave's finalize and their rejoin's start landed close together — see
+    // recording-cpu-starvation-history. A promise chain, not a counter/lock, so callers just
+    // await their own link and one operation's rejection can't jam the queue for the rest.
+    opQueue: Promise<void>;
 }

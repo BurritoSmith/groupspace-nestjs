@@ -271,19 +271,18 @@ export class RecordingService {
             videoSessions: new Map(),
             streamNumberCounters: new Map(),
             pendingFinalizations: new Set(),
-            startQueue: Promise.resolve(),
-            stopQueue: Promise.resolve(),
+            opQueue: Promise.resolve(),
         };
         // Set before awaiting so a concurrent start-recording call for the same room fails fast.
         this.rooms.set(roomName, state);
 
         try {
             // webcam, screen, AND mic all go through the same per-producer session now. Routed
-            // through enqueueStart() (not called directly) so starts are staggered the same way
+            // through enqueueOp() (not called directly) so starts are staggered the same way
             // as notifyProducerCreated()'s — several producers already existing when recording is
             // turned on is exactly the scenario that starved encoders in the "hunch" incident.
             for (const producer of snapshot.producers) {
-                await this.enqueueStart(state, () => this.startVideoSession(state, snapshot.router, producer));
+                await this.enqueueOp(state, () => this.startVideoSession(state, snapshot.router, producer));
             }
         } catch (error) {
             this.rooms.delete(roomName);
@@ -336,7 +335,7 @@ export class RecordingService {
         if (producer.source === 'mic') {
             this.logEvent(state.sessionDbId, 'join', producer.peerId, producer.userId, producer.displayName);
         }
-        void this.enqueueStart(state, () => this.startVideoSession(state, router, producer)).catch((error: unknown) =>
+        void this.enqueueOp(state, () => this.startVideoSession(state, router, producer)).catch((error: unknown) =>
             this.logger.error(`Failed to start recording ${producer.source} producer ${producer.producerId} in room ${roomName}: ${error}`),
         );
     }
@@ -349,34 +348,22 @@ export class RecordingService {
     // failing again on the live VM.
     private static readonly RECORDING_STAGGER_MS = 500;
 
-    /** Serializes `run` (a startVideoSession() call) onto the room's per-room FIFO chain, so
-     *  concurrent producer starts — several already-active producers when recording is turned on
-     *  (start()), or several new producers negotiating close together while already recording
-     *  (notifyProducerCreated()) — spawn their ffmpeg encoders one at a time with a settle pause
-     *  between them, instead of all piling onto the CPU in the same instant. One start's
-     *  rejection is captured here and does not propagate into the chain, so it can never jam
-     *  subsequent queued starts; the caller still observes the rejection via the returned promise. */
-    private enqueueStart(state: IRoomRecordingState, run: () => Promise<void>): Promise<void> {
-        // state.startQueue never itself rejects (see the .catch(() => undefined) below), so
-        // chaining with .then(run) alone is safe — run() only ever begins once its predecessor,
-        // success or failure, has fully settled (including its stagger pause).
-        const settled = state.startQueue.then(run);
-        state.startQueue = settled
-            .catch(() => undefined)
-            .then(() => new Promise<void>((resolve) => setTimeout(resolve, RecordingService.RECORDING_STAGGER_MS)));
-        return settled;
-    }
-
-    /** Same pattern as enqueueStart(), for finalizeVideoSession() calls — stopping several active
-     *  streams at once (teardownRoom's Promise.all, or several notifyProducerClosing() calls close
-     *  together, e.g. "stop all streams") used to send every ffmpeg process its graceful-quit
-     *  signal in the same instant, which could starve one of them out of the 5s SIGKILL grace
-     *  period just as easily as an unstaggered start could starve a fresh encoder — confirmed live
-     *  (room "afcu", session "Checking": mic and one screen recorded fine, the second screen share
-     *  didn't exit in time, got SIGKILL'd, and its file came out corrupt). */
-    private enqueueStop(state: IRoomRecordingState, run: () => Promise<void>): Promise<void> {
-        const settled = state.stopQueue.then(run);
-        state.stopQueue = settled
+    /** Serializes `run` (a startVideoSession() or finalizeVideoSession() call) onto the room's
+     *  single shared FIFO chain, so no two CPU-heavy ffmpeg spin-up/spin-down moments for this
+     *  room ever land in the same instant — regardless of whether they're both starts (several
+     *  producers negotiating close together), both stops ("stop all streams" closing several
+     *  producers at once, or teardownRoom's Promise.all), or one of each (a stream's finalize
+     *  racing a *different* stream's start — confirmed as the cause of a rejoining participant's
+     *  mic recording coming out corrupted when their leave's finalize and their rejoin's start
+     *  landed close together; see recording-cpu-starvation-history). One operation's rejection is
+     *  captured here and does not propagate into the chain, so it can never jam subsequent queued
+     *  operations; the caller still observes the rejection via the returned promise. */
+    private enqueueOp(state: IRoomRecordingState, run: () => Promise<void>): Promise<void> {
+        // state.opQueue never itself rejects (see the .catch(() => undefined) below), so chaining
+        // with .then(run) alone is safe — run() only ever begins once its predecessor, success or
+        // failure, has fully settled (including its stagger pause).
+        const settled = state.opQueue.then(run);
+        state.opQueue = settled
             .catch(() => undefined)
             .then(() => new Promise<void>((resolve) => setTimeout(resolve, RecordingService.RECORDING_STAGGER_MS)));
         return settled;
@@ -397,7 +384,7 @@ export class RecordingService {
             this.logEvent(state.sessionDbId, 'leave', session.peerId, session.userId, session.displayName);
         }
         state.videoSessions.delete(producerId);
-        const finalizing = this.enqueueStop(state, () => this.finalizeVideoSession(state, session)).catch((error: unknown) =>
+        const finalizing = this.enqueueOp(state, () => this.finalizeVideoSession(state, session)).catch((error: unknown) =>
             this.logger.error(`Error finalizing recording for producer ${producerId}: ${error}`),
         );
         state.pendingFinalizations.add(finalizing);
@@ -649,10 +636,10 @@ export class RecordingService {
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
         // Finalizes whatever's still open, AND waits for anything already finalizing in the
         // background from an earlier individual stream stop (see pendingFinalizations). Routed
-        // through enqueueStop() (not called directly) so every open session's ffmpeg gets its
+        // through enqueueOp() (not called directly) so every open session's ffmpeg gets its
         // graceful-quit signal staggered instead of all at once — see that method's comment.
         await Promise.all([
-            ...[...state.videoSessions.values()].map((session) => this.enqueueStop(state, () => this.finalizeVideoSession(state, session))),
+            ...[...state.videoSessions.values()].map((session) => this.enqueueOp(state, () => this.finalizeVideoSession(state, session))),
             ...state.pendingFinalizations,
         ]);
     }
