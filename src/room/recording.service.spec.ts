@@ -34,8 +34,7 @@ describe('RecordingService', () => {
                 videoSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
-                startQueue: Promise.resolve(),
-                stopQueue: Promise.resolve(),
+                opQueue: Promise.resolve(),
             });
 
             expect(service.getRecordingStartedAt('room1')).toBe(startedAt);
@@ -80,8 +79,7 @@ describe('RecordingService', () => {
                 videoSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
-                startQueue: Promise.resolve(),
-                stopQueue: Promise.resolve(),
+                opQueue: Promise.resolve(),
             };
             (recordingService as unknown as { rooms: Map<string, IRoomRecordingState> }).rooms.set('room1', state);
             return state;
@@ -440,8 +438,7 @@ describe('RecordingService', () => {
                 videoSessions: new Map([['producer-1', {} as IRecordingVideoSession]]),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
-                startQueue: Promise.resolve(),
-                stopQueue: Promise.resolve(),
+                opQueue: Promise.resolve(),
             };
         }
 
@@ -505,12 +502,18 @@ describe('RecordingService', () => {
         });
     });
 
-    describe('enqueueStart — throttling concurrent recording starts within a room', () => {
-        // Regression test for the "hunch"/"hunchimus prime" incident: several producers (a
-        // user's webcam+screen+mic, or several users' streams) starting within the same few
-        // seconds spawned that many CPU-heavy ffmpeg encoders at once, starving one or more of
-        // them badly enough that they never wrote a usable frame. enqueueStart() serializes
-        // starts per room with a settle pause between them instead.
+    describe('enqueueOp — throttling concurrent recording starts/stops within a room', () => {
+        // Regression coverage for two incidents plus the gap between them:
+        // - "hunch"/"hunchimus prime": several producers starting within the same few seconds
+        //   spawned that many CPU-heavy ffmpeg encoders at once, starving one or more of them
+        //   badly enough that they never wrote a usable frame.
+        // - room "afcu", session "Checking": several finalizes (ffmpeg graceful-quit + remux)
+        //   firing at once starved one out of its 5s SIGKILL grace period, corrupting its file.
+        // - the gap: starts and stops used to run on two INDEPENDENT queues, so a stream's
+        //   finalize (stop) and a *different* stream's start could still land in the same
+        //   instant — exactly what corrupted a rejoining participant's mic recording when their
+        //   leave's finalize and their rejoin's start happened close together. enqueueOp() is the
+        //   single shared FIFO chain that closes all three cases at once.
         function buildState(): IRoomRecordingState {
             return {
                 roomName: 'room1',
@@ -520,14 +523,13 @@ describe('RecordingService', () => {
                 videoSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
-                startQueue: Promise.resolve(),
-                stopQueue: Promise.resolve(),
+                opQueue: Promise.resolve(),
             };
         }
 
-        type EnqueueStart = (state: IRoomRecordingState, run: () => Promise<void>) => Promise<void>;
-        const enqueueStart = (state: IRoomRecordingState, run: () => Promise<void>) =>
-            (service as unknown as { enqueueStart: EnqueueStart }).enqueueStart.call(service, state, run);
+        type EnqueueOp = (state: IRoomRecordingState, run: () => Promise<void>) => Promise<void>;
+        const enqueueOp = (state: IRoomRecordingState, run: () => Promise<void>) =>
+            (service as unknown as { enqueueOp: EnqueueOp }).enqueueOp.call(service, state, run);
 
         afterEach(() => {
             jest.useRealTimers();
@@ -538,10 +540,10 @@ describe('RecordingService', () => {
             const state = buildState();
             const order: string[] = [];
 
-            const first = enqueueStart(state, async () => {
+            const first = enqueueOp(state, async () => {
                 order.push('first-start');
             });
-            const second = enqueueStart(state, async () => {
+            const second = enqueueOp(state, async () => {
                 order.push('second-start');
             });
 
@@ -560,11 +562,11 @@ describe('RecordingService', () => {
             const state = buildState();
             const order: string[] = [];
 
-            const first = enqueueStart(state, async () => {
+            const first = enqueueOp(state, async () => {
                 throw new Error('boom');
             });
             first.catch(() => undefined); // observed below via expect().rejects — prevents an unhandled-rejection warning in the meantime
-            const second = enqueueStart(state, async () => {
+            const second = enqueueOp(state, async () => {
                 order.push('second-start');
             });
 
@@ -574,47 +576,16 @@ describe('RecordingService', () => {
             await expect(first).rejects.toThrow('boom');
             await second;
         });
-    });
-
-    describe('enqueueStop — throttling concurrent recording finalizations within a room', () => {
-        // Regression test: room "afcu", session "Checking" — mic and one screen share finalized
-        // fine, but the second screen share's ffmpeg didn't respond to the graceful-quit signal
-        // within the 5s SIGKILL grace period and came out corrupted. teardownRoom() (and
-        // notifyProducerClosing(), for an individually-stopped stream) used to finalize every open
-        // session concurrently via Promise.all — just as capable of piling simultaneous CPU-heavy
-        // ffmpeg work onto stop as an unstaggered start was. enqueueStop() serializes finalizes
-        // per room with the same settle pause enqueueStart() already uses for starts.
-        function buildState(): IRoomRecordingState {
-            return {
-                roomName: 'room1',
-                sessionDbId: 'session-1',
-                sessionName: 'Test Session',
-                startedAt: new Date('2026-07-28T12:00:00.000Z'),
-                videoSessions: new Map(),
-                streamNumberCounters: new Map(),
-                pendingFinalizations: new Set(),
-                startQueue: Promise.resolve(),
-                stopQueue: Promise.resolve(),
-            };
-        }
-
-        type EnqueueStop = (state: IRoomRecordingState, run: () => Promise<void>) => Promise<void>;
-        const enqueueStop = (state: IRoomRecordingState, run: () => Promise<void>) =>
-            (service as unknown as { enqueueStop: EnqueueStop }).enqueueStop.call(service, state, run);
-
-        afterEach(() => {
-            jest.useRealTimers();
-        });
 
         it('does not begin the second queued stop until the first has settled plus the stagger delay', async () => {
             jest.useFakeTimers();
             const state = buildState();
             const order: string[] = [];
 
-            const first = enqueueStop(state, async () => {
+            const first = enqueueOp(state, async () => {
                 order.push('first-stop');
             });
-            const second = enqueueStop(state, async () => {
+            const second = enqueueOp(state, async () => {
                 order.push('second-stop');
             });
 
@@ -633,11 +604,11 @@ describe('RecordingService', () => {
             const state = buildState();
             const order: string[] = [];
 
-            const first = enqueueStop(state, async () => {
+            const first = enqueueOp(state, async () => {
                 throw new Error('boom');
             });
             first.catch(() => undefined);
-            const second = enqueueStop(state, async () => {
+            const second = enqueueOp(state, async () => {
                 order.push('second-stop');
             });
 
@@ -646,6 +617,28 @@ describe('RecordingService', () => {
             expect(order).toEqual(['second-stop']);
             await expect(first).rejects.toThrow('boom');
             await second;
+        });
+
+        it('a queued start does not begin until an earlier-queued stop for a DIFFERENT stream has settled plus the stagger delay', async () => {
+            jest.useFakeTimers();
+            const state = buildState();
+            const order: string[] = [];
+
+            const stop = enqueueOp(state, async () => {
+                order.push('stop');
+            });
+            const start = enqueueOp(state, async () => {
+                order.push('start');
+            });
+
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(order).toEqual(['stop']); // the start is still waiting on the stop's stagger delay
+
+            await jest.advanceTimersByTimeAsync(500);
+            expect(order).toEqual(['stop', 'start']);
+
+            await Promise.all([stop, start]);
         });
 
         it('teardownRoom() staggers finalizing every still-open session instead of finalizing them all at once', async () => {
