@@ -1,9 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { EventEmitter } from 'node:events';
-import { promises as fsPromises } from 'node:fs';
 import { PrismaService } from '../prisma/prisma.service';
 import { RecordingService } from './recording.service';
-import { IRecordingProducerInfo, IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
+import { IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
 
 function createFakePrisma() {
     return {
@@ -36,7 +34,6 @@ describe('RecordingService', () => {
                 videoSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
-                opQueue: Promise.resolve(),
             });
 
             expect(service.getRecordingStartedAt('room1')).toBe(startedAt);
@@ -65,13 +62,6 @@ describe('RecordingService', () => {
     });
 
     describe('notifyProducerCreated / notifyProducerClosing — join/leave timeline events', () => {
-        // enqueueStart/enqueueStop's stagger pause (see RECORDING_STAGGER_MS) schedules a real
-        // setTimeout otherwise, which outlives these synchronous tests and leaves Jest's worker
-        // unable to exit cleanly — same reasoning as the enqueueStart/enqueueStop describe blocks
-        // further down this file.
-        beforeEach(() => jest.useFakeTimers());
-        afterEach(() => jest.useRealTimers());
-
         function buildState(recordingService: RecordingService): IRoomRecordingState {
             const state: IRoomRecordingState = {
                 roomName: 'room1',
@@ -81,7 +71,6 @@ describe('RecordingService', () => {
                 videoSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
-                opQueue: Promise.resolve(),
             };
             (recordingService as unknown as { rooms: Map<string, IRoomRecordingState> }).rooms.set('room1', state);
             return state;
@@ -215,7 +204,7 @@ describe('RecordingService', () => {
                 recordings: [
                     {
                         id: 'rec-1',
-                        filename: 'a.mp4',
+                        filename: 'a.webm',
                         streamType: 'screen',
                         displayName: 'Alice',
                         userId: 'user-1',
@@ -270,7 +259,7 @@ describe('RecordingService', () => {
 
         it('returns a null url before the recording has stopped', async () => {
             const { url } = await call({
-                filename: 'a.mp4',
+                filename: 'a.webm',
                 gcsPath: null,
                 gcsUploadedAt: null,
                 stoppedAt: null,
@@ -283,20 +272,20 @@ describe('RecordingService', () => {
 
         it('serves the local file URL once stopped, even with a gcsPath assigned but not yet uploaded', async () => {
             const { url } = await call({
-                filename: 'a.mp4',
-                gcsPath: 'room/session/a.mp4',
+                filename: 'a.webm',
+                gcsPath: 'room/session/a.webm',
                 gcsUploadedAt: null,
                 stoppedAt: new Date(),
                 hasContent: true,
                 thumbnailStatus: null,
                 thumbnailUpdatedAt: null,
             });
-            expect(url).toContain('/recordings/a.mp4');
+            expect(url).toContain('/recordings/a.webm');
         });
 
         it('returns a null url when the recording stopped but never captured any content, even though stoppedAt is set', () => {
             return call({
-                filename: 'a.mp4',
+                filename: 'a.webm',
                 gcsPath: null,
                 gcsUploadedAt: null,
                 stoppedAt: new Date(),
@@ -310,8 +299,8 @@ describe('RecordingService', () => {
             // Shouldn't happen in practice (uploadAndNotify is gated on hasContent too), but
             // buildPlaybackUrls must never link to a nonexistent file regardless of upload state.
             return call({
-                filename: 'a.mp4',
-                gcsPath: 'room/session/a.mp4',
+                filename: 'a.webm',
+                gcsPath: 'room/session/a.webm',
                 gcsUploadedAt: new Date(),
                 stoppedAt: new Date(),
                 hasContent: false,
@@ -322,7 +311,7 @@ describe('RecordingService', () => {
 
         it('returns a null thumbnailUrl when thumbnailStatus is null', async () => {
             const { thumbnailUrl } = await call({
-                filename: 'a.mp4',
+                filename: 'a.webm',
                 gcsPath: null,
                 gcsUploadedAt: null,
                 stoppedAt: new Date(),
@@ -336,7 +325,7 @@ describe('RecordingService', () => {
         it('builds a cache-busted thumbnail URL when a thumbnail exists', async () => {
             const updatedAt = new Date('2026-01-01T00:00:00Z');
             const { thumbnailUrl } = await call({
-                filename: 'a.mp4',
+                filename: 'a.webm',
                 gcsPath: null,
                 gcsUploadedAt: null,
                 stoppedAt: new Date(),
@@ -351,12 +340,12 @@ describe('RecordingService', () => {
 
     describe('path helpers', () => {
         it('derives the temp recording path via string replace', () => {
-            const result = (service as unknown as { tempRecordingPath: (p: string) => string }).tempRecordingPath('/recordings/a.mp4');
-            expect(result).toBe('/recordings/a.recording.mp4');
+            const result = (service as unknown as { tempRecordingPath: (p: string) => string }).tempRecordingPath('/recordings/a.webm');
+            expect(result).toBe('/recordings/a.recording.webm');
         });
 
         it('derives the thumbnail path via string replace', () => {
-            const result = (service as unknown as { thumbnailPath: (p: string) => string }).thumbnailPath('/recordings/a.mp4');
+            const result = (service as unknown as { thumbnailPath: (p: string) => string }).thumbnailPath('/recordings/a.webm');
             expect(result).toBe('/recordings/a.thumb.jpg');
         });
     });
@@ -386,7 +375,7 @@ describe('RecordingService', () => {
         it('omits the peerId segment entirely when none is given', () => {
             const buildFilename = (service as unknown as { buildFilename: BuildFilename }).buildFilename.bind(service);
             const result = buildFilename('lobby', 'mixed-audio', 'audio', 1, '20260727T074320');
-            expect(result).toBe('lobby-mixed-audio-20260727T074320-audio-1.mp4');
+            expect(result).toBe('lobby-mixed-audio-20260727T074320-audio-1.webm');
         });
     });
 
@@ -394,33 +383,35 @@ describe('RecordingService', () => {
         it('returns false without invoking ffmpeg when the temp file is missing', async () => {
             const result = await (
                 service as unknown as { remuxToFinalFile: (tempPath: string, finalPath: string) => Promise<boolean> }
-            ).remuxToFinalFile('/nonexistent/path/does-not-exist.recording.mp4', '/nonexistent/path/does-not-exist.mp4');
+            ).remuxToFinalFile('/nonexistent/path/does-not-exist.recording.webm', '/nonexistent/path/does-not-exist.webm');
             expect(result).toBe(false);
         });
     });
 
     describe('buildRecordingFfmpegArgs', () => {
-        type BuildArgs = (isAudio: boolean, sdpPath: string, tempOutputPath: string) => string[];
+        type BuildArgs = (sdpPath: string, tempOutputPath: string) => string[];
 
-        it('chooses the AAC audio codec (no video codec) when recording a mic producer', () => {
+        it('stream-copies (no transcode) for any producer — mediasoup only ever negotiates VP8/Opus, which is already directly playable', () => {
             const buildArgs = (service as unknown as { buildRecordingFfmpegArgs: BuildArgs }).buildRecordingFfmpegArgs.bind(service);
-            const args = buildArgs(true, '/tmp/a.sdp', '/recordings/a.recording.mp4');
-            expect(args).toContain('-c:a');
-            expect(args).toContain('aac');
+            const args = buildArgs('/tmp/a.sdp', '/recordings/a.recording.webm');
+            expect(args).toContain('-c');
+            expect(args).toContain('copy');
+            expect(args).toContain('-flush_packets');
+            // No re-encode, so none of the old transcode-only flags should be present.
             expect(args).not.toContain('-c:v');
+            expect(args).not.toContain('-c:a');
             expect(args).not.toContain('libx264');
-            // Audio has no keyframe concept — fragments every frame instead.
-            expect(args).toContain('+frag_every_frame+empty_moov+faststart');
+            expect(args).not.toContain('aac');
+            expect(args).not.toContain('-preset');
+            expect(args).not.toContain('-force_key_frames');
+            expect(args).not.toContain('-fps_mode');
+            expect(args).not.toContain('-movflags');
         });
 
-        it('chooses the H.264 video codec (no audio codec) when recording a webcam/screen producer', () => {
+        it('targets the given temp output path', () => {
             const buildArgs = (service as unknown as { buildRecordingFfmpegArgs: BuildArgs }).buildRecordingFfmpegArgs.bind(service);
-            const args = buildArgs(false, '/tmp/a.sdp', '/recordings/a.recording.mp4');
-            expect(args).toContain('-c:v');
-            expect(args).toContain('libx264');
-            expect(args).not.toContain('-c:a');
-            expect(args).not.toContain('aac');
-            expect(args).toContain('+frag_keyframe+empty_moov+faststart');
+            const args = buildArgs('/tmp/a.sdp', '/recordings/a.recording.webm');
+            expect(args[args.length - 1]).toBe('/recordings/a.recording.webm');
         });
     });
 
@@ -440,16 +431,10 @@ describe('RecordingService', () => {
                 videoSessions: new Map([['producer-1', {} as IRecordingVideoSession]]),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
-                opQueue: Promise.resolve(),
             };
         }
 
-        afterEach(() => {
-            jest.useRealTimers();
-        });
-
         it('notifyProducerClosing() removes the session from videoSessions synchronously but tracks it in pendingFinalizations until it settles', async () => {
-            jest.useFakeTimers();
             const state = buildState();
             let resolveFinalize!: () => void;
             const finalizeSpy = jest
@@ -467,10 +452,8 @@ describe('RecordingService', () => {
             expect(state.pendingFinalizations.size).toBe(1); // but tracked as in-flight
 
             resolveFinalize();
-            // Now routed through enqueueStop() (see notifyProducerClosing()), which adds an extra
-            // promise-chain hop before the .finally() cleanup fires — advancing timers also drains
-            // the extra microtask ticks that plain awaits below no longer reliably cover.
-            await jest.advanceTimersByTimeAsync(500);
+            await Promise.resolve();
+            await Promise.resolve();
             expect(state.pendingFinalizations.size).toBe(0); // cleaned up once settled
         });
 
@@ -504,322 +487,4 @@ describe('RecordingService', () => {
         });
     });
 
-    describe('enqueueOp — throttling concurrent recording starts/stops within a room', () => {
-        // Regression coverage for two incidents plus the gap between them:
-        // - "hunch"/"hunchimus prime": several producers starting within the same few seconds
-        //   spawned that many CPU-heavy ffmpeg encoders at once, starving one or more of them
-        //   badly enough that they never wrote a usable frame.
-        // - room "afcu", session "Checking": several finalizes (ffmpeg graceful-quit + remux)
-        //   firing at once starved one out of its 5s SIGKILL grace period, corrupting its file.
-        // - the gap: starts and stops used to run on two INDEPENDENT queues, so a stream's
-        //   finalize (stop) and a *different* stream's start could still land in the same
-        //   instant — exactly what corrupted a rejoining participant's mic recording when their
-        //   leave's finalize and their rejoin's start happened close together. enqueueOp() is the
-        //   single shared FIFO chain that closes all three cases at once.
-        function buildState(): IRoomRecordingState {
-            return {
-                roomName: 'room1',
-                sessionDbId: 'session-1',
-                sessionName: 'Test Session',
-                startedAt: new Date('2026-07-28T12:00:00.000Z'),
-                videoSessions: new Map(),
-                streamNumberCounters: new Map(),
-                pendingFinalizations: new Set(),
-                opQueue: Promise.resolve(),
-            };
-        }
-
-        type EnqueueOp = (state: IRoomRecordingState, run: () => Promise<void>) => Promise<void>;
-        const enqueueOp = (state: IRoomRecordingState, run: () => Promise<void>) =>
-            (service as unknown as { enqueueOp: EnqueueOp }).enqueueOp.call(service, state, run);
-
-        afterEach(() => {
-            jest.useRealTimers();
-        });
-
-        it('does not begin the second queued start until the first has settled plus the stagger delay', async () => {
-            jest.useFakeTimers();
-            const state = buildState();
-            const order: string[] = [];
-
-            const first = enqueueOp(state, async () => {
-                order.push('first-start');
-            });
-            const second = enqueueOp(state, async () => {
-                order.push('second-start');
-            });
-
-            await Promise.resolve();
-            await Promise.resolve();
-            expect(order).toEqual(['first-start']); // second is still waiting on the stagger delay
-
-            await jest.advanceTimersByTimeAsync(500);
-            expect(order).toEqual(['first-start', 'second-start']);
-
-            await Promise.all([first, second]);
-        });
-
-        it("a rejected start doesn't jam the queue for the next one", async () => {
-            jest.useFakeTimers();
-            const state = buildState();
-            const order: string[] = [];
-
-            const first = enqueueOp(state, async () => {
-                throw new Error('boom');
-            });
-            first.catch(() => undefined); // observed below via expect().rejects — prevents an unhandled-rejection warning in the meantime
-            const second = enqueueOp(state, async () => {
-                order.push('second-start');
-            });
-
-            await jest.advanceTimersByTimeAsync(500);
-
-            expect(order).toEqual(['second-start']);
-            await expect(first).rejects.toThrow('boom');
-            await second;
-        });
-
-        it('does not begin the second queued stop until the first has settled plus the stagger delay', async () => {
-            jest.useFakeTimers();
-            const state = buildState();
-            const order: string[] = [];
-
-            const first = enqueueOp(state, async () => {
-                order.push('first-stop');
-            });
-            const second = enqueueOp(state, async () => {
-                order.push('second-stop');
-            });
-
-            await Promise.resolve();
-            await Promise.resolve();
-            expect(order).toEqual(['first-stop']); // second is still waiting on the stagger delay
-
-            await jest.advanceTimersByTimeAsync(500);
-            expect(order).toEqual(['first-stop', 'second-stop']);
-
-            await Promise.all([first, second]);
-        });
-
-        it("a rejected stop doesn't jam the queue for the next one", async () => {
-            jest.useFakeTimers();
-            const state = buildState();
-            const order: string[] = [];
-
-            const first = enqueueOp(state, async () => {
-                throw new Error('boom');
-            });
-            first.catch(() => undefined);
-            const second = enqueueOp(state, async () => {
-                order.push('second-stop');
-            });
-
-            await jest.advanceTimersByTimeAsync(500);
-
-            expect(order).toEqual(['second-stop']);
-            await expect(first).rejects.toThrow('boom');
-            await second;
-        });
-
-        it('a queued start does not begin until an earlier-queued stop for a DIFFERENT stream has settled plus the stagger delay', async () => {
-            jest.useFakeTimers();
-            const state = buildState();
-            const order: string[] = [];
-
-            const stop = enqueueOp(state, async () => {
-                order.push('stop');
-            });
-            const start = enqueueOp(state, async () => {
-                order.push('start');
-            });
-
-            await Promise.resolve();
-            await Promise.resolve();
-            expect(order).toEqual(['stop']); // the start is still waiting on the stop's stagger delay
-
-            await jest.advanceTimersByTimeAsync(500);
-            expect(order).toEqual(['stop', 'start']);
-
-            await Promise.all([stop, start]);
-        });
-
-        it('teardownRoom() staggers finalizing every still-open session instead of finalizing them all at once', async () => {
-            jest.useFakeTimers();
-            const state = buildState();
-            state.videoSessions.set('producer-1', { producerId: 'producer-1' } as IRecordingVideoSession);
-            state.videoSessions.set('producer-2', { producerId: 'producer-2' } as IRecordingVideoSession);
-            const order: string[] = [];
-            const finalizeSpy = jest.fn().mockImplementation(async (_state: IRoomRecordingState, session: IRecordingVideoSession) => {
-                order.push(session.producerId);
-            });
-            (service as unknown as { finalizeVideoSession: typeof finalizeSpy }).finalizeVideoSession = finalizeSpy;
-
-            const teardown = (service as unknown as { teardownRoom: (state: IRoomRecordingState) => Promise<void> }).teardownRoom(state);
-
-            await Promise.resolve();
-            await Promise.resolve();
-            expect(order).toEqual(['producer-1']); // second session's finalize hasn't started yet
-
-            await jest.advanceTimersByTimeAsync(500);
-            expect(order).toEqual(['producer-1', 'producer-2']);
-
-            await teardown;
-        });
-    });
-
-    describe('startVideoSession — stall detection (CPU-starved encoder retry)', () => {
-        // Regression test for a real production incident: a screen-share's recording ffmpeg
-        // process received RTP fine (the live share worked, confirmed by other participants) but
-        // fell behind consuming it — logging ffmpeg's own "max delay reached. need to consume
-        // packet" — and never wrote a single frame, so remuxToFinalFile found the temp file empty
-        // and the recording silently came back hasContent: false with no earlier sign anything
-        // was wrong. startVideoSession now watches for that exact signal during a short window
-        // right after starting and, if seen, kills that attempt and retries on a fresh port —
-        // reusing the same MAX_ATTEMPTS retry loop already used for hard failures.
-        function buildFakeConsumer() {
-            return {
-                rtpParameters: { codecs: [{ mimeType: 'video/H264', payloadType: 96, clockRate: 90000 }] },
-                resume: jest.fn().mockResolvedValue(undefined),
-                requestKeyFrame: jest.fn().mockResolvedValue(undefined),
-            };
-        }
-
-        function buildFakeRouter(consumers: ReturnType<typeof buildFakeConsumer>[]) {
-            let call = 0;
-            return {
-                rtpCapabilities: {},
-                createPlainTransport: jest.fn().mockImplementation(() =>
-                    Promise.resolve({
-                        connect: jest.fn().mockResolvedValue(undefined),
-                        consume: jest.fn().mockImplementation(() => Promise.resolve(consumers[Math.min(call++, consumers.length - 1)])),
-                        close: jest.fn(),
-                    }),
-                ),
-            };
-        }
-
-        function buildFakeFfmpeg() {
-            return { stderr: new EventEmitter(), kill: jest.fn(), exitCode: null, signalCode: null };
-        }
-
-        function buildState(): IRoomRecordingState {
-            return {
-                roomName: 'room1',
-                sessionDbId: 'session-1',
-                sessionName: 'Test Session',
-                startedAt: new Date('2026-07-29T12:00:00.000Z'),
-                videoSessions: new Map(),
-                streamNumberCounters: new Map(),
-                pendingFinalizations: new Set(),
-                opQueue: Promise.resolve(),
-            };
-        }
-
-        const producerInfo: IRecordingProducerInfo = {
-            producerId: 'producer-1',
-            peerId: 'peer-1',
-            userId: 'user-1',
-            displayName: 'Clay',
-            source: 'screen',
-        };
-
-        type StartVideoSession = (
-            state: IRoomRecordingState,
-            router: unknown,
-            info: IRecordingProducerInfo,
-        ) => Promise<void>;
-
-        let recordingCreate: jest.Mock;
-        let recordingService: RecordingService;
-
-        beforeEach(() => {
-            jest.useFakeTimers();
-            recordingCreate = jest.fn().mockResolvedValue({ id: 'db-1', userId: 'user-1', user: null });
-            const fakePrisma = { ...createFakePrisma(), recording: { create: recordingCreate } };
-            recordingService = new RecordingService(fakePrisma as never);
-            jest.spyOn(fsPromises, 'writeFile').mockResolvedValue(undefined);
-            jest.spyOn(fsPromises, 'unlink').mockResolvedValue(undefined);
-        });
-
-        afterEach(() => {
-            jest.useRealTimers();
-            jest.restoreAllMocks();
-        });
-
-        // Pragmatic microtask flush — startVideoSession chains several already-mocked-resolved
-        // awaits (transport.connect, transport.consume, fs.writeFile, spawnFfmpegAndWaitReady,
-        // consumer.resume) before reaching the stall-check setTimeout; this drains all of them
-        // without needing to count exactly how many ticks each one takes.
-        async function flushMicrotasks(): Promise<void> {
-            for (let i = 0; i < 10; i++) {
-                await Promise.resolve();
-            }
-        }
-
-        it('kills the stalled ffmpeg and retries on a fresh port when the stall signal appears within the check window', async () => {
-            const state = buildState();
-            const router = buildFakeRouter([buildFakeConsumer(), buildFakeConsumer()]);
-            const stalledFfmpeg = buildFakeFfmpeg();
-            const healthyFfmpeg = buildFakeFfmpeg();
-            let spawnCall = 0;
-            (recordingService as unknown as { spawnFfmpegAndWaitReady: jest.Mock }).spawnFfmpegAndWaitReady = jest
-                .fn()
-                .mockImplementation(() => Promise.resolve(spawnCall++ === 0 ? stalledFfmpeg : healthyFfmpeg));
-
-            const promise = (
-                recordingService as unknown as { startVideoSession: StartVideoSession }
-            ).startVideoSession(state, router as never, producerInfo);
-
-            await flushMicrotasks();
-            stalledFfmpeg.stderr.emit('data', Buffer.from('[sdp @ 0x1] max delay reached. need to consume packet\n'));
-            await jest.advanceTimersByTimeAsync(5000); // first attempt's stall-check window elapses
-
-            await flushMicrotasks();
-            await jest.advanceTimersByTimeAsync(5000); // second (healthy) attempt's own window elapses
-
-            await promise;
-
-            expect(stalledFfmpeg.kill).toHaveBeenCalledWith('SIGKILL');
-            expect(recordingCreate).toHaveBeenCalledTimes(1); // only the successful 2nd attempt persisted a row
-            expect(state.videoSessions.get('producer-1')?.ffmpeg).toBe(healthyFfmpeg);
-        });
-
-        it('does not retry, and does not kill ffmpeg, when no stall signal appears within the check window', async () => {
-            const state = buildState();
-            const router = buildFakeRouter([buildFakeConsumer()]);
-            const ffmpeg = buildFakeFfmpeg();
-            (recordingService as unknown as { spawnFfmpegAndWaitReady: jest.Mock }).spawnFfmpegAndWaitReady = jest
-                .fn()
-                .mockResolvedValue(ffmpeg);
-
-            const promise = (
-                recordingService as unknown as { startVideoSession: StartVideoSession }
-            ).startVideoSession(state, router as never, producerInfo);
-
-            await flushMicrotasks();
-            await jest.advanceTimersByTimeAsync(5000);
-
-            await promise;
-
-            expect(ffmpeg.kill).not.toHaveBeenCalled();
-            expect(recordingCreate).toHaveBeenCalledTimes(1);
-            expect(state.videoSessions.get('producer-1')?.ffmpeg).toBe(ffmpeg);
-        });
-
-        it('skips the stall-check delay entirely for audio (mic) producers', async () => {
-            const state = buildState();
-            const router = buildFakeRouter([buildFakeConsumer()]);
-            const ffmpeg = buildFakeFfmpeg();
-            (recordingService as unknown as { spawnFfmpegAndWaitReady: jest.Mock }).spawnFfmpegAndWaitReady = jest
-                .fn()
-                .mockResolvedValue(ffmpeg);
-
-            await (recordingService as unknown as { startVideoSession: StartVideoSession }).startVideoSession(state, router as never, {
-                ...producerInfo,
-                source: 'mic',
-            });
-
-            expect(recordingCreate).toHaveBeenCalledTimes(1); // resolved without needing advanceTimersByTimeAsync at all
-        });
-    });
 });
