@@ -7,6 +7,10 @@ export interface IChatMessage {
     id: string;
     userId: string;
     displayName: string;
+    // Snapshotted at send-time, same as displayName — see ChatMessage.pictureUrl's schema
+    // comment. Empty string (not null) here: the frontend falls back to a generic person icon
+    // either way, so callers don't need to special-case null vs. missing.
+    pictureUrl: string;
     text: string;
     at: string;
 }

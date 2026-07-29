@@ -5,21 +5,27 @@ describe('RoomGateway', () => {
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
     let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock };
+    let fakeChatService: { saveMessage: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
         fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn() };
+        fakeChatService = { saveMessage: jest.fn() };
         gateway = new RoomGateway(
             fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
             {} as never, // googleAuthService
             fakeEventEmitter as never, // recordingService
             {} as never, // usersService
-            {} as never, // chatService
+            fakeChatService as never, // chatService
             {} as never, // sessionService
         );
         emitSpy = jest.fn();
         toSpy = jest.fn().mockReturnValue({ emit: emitSpy });
+        // onChatMessage broadcasts via this.server.to() (unlike socket.to() used everywhere else
+        // in this file) — @WebSocketServer() only wires this up via Nest's DI at runtime, so a
+        // plain `new RoomGateway(...)` here needs it set by hand.
+        (gateway as unknown as { server: { to: jest.Mock } }).server = { to: toSpy };
     });
 
     function fakeSocket(data: Record<string, unknown>) {
@@ -98,6 +104,35 @@ describe('RoomGateway', () => {
             const result = await gateway.onSetConsumerQuality(fakeSocket({}), { consumerId: 'consumer-1', quality: 'high' });
 
             expect(result).toEqual({ ok: false, error: 'No consumer consumer-1 for peer peer-1' });
+        });
+    });
+
+    describe('onChatMessage', () => {
+        // Regression coverage: pictureUrl is carried on socket.data (set in onJoinRoom) so a
+        // message snapshots the sender's avatar at send-time, the same way displayName already
+        // does — see IChatMessage.pictureUrl's comment.
+        it('includes the sender\'s pictureUrl (from socket.data) in both the broadcast and the persisted row', () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay', pictureUrl: 'https://pic' }), {
+                text: 'hello',
+            });
+
+            expect(toSpy).toHaveBeenCalledWith('lobby');
+            expect(emitSpy).toHaveBeenCalledWith('chat-message', expect.objectContaining({ pictureUrl: 'https://pic' }));
+            expect(fakeChatService.saveMessage).toHaveBeenCalledWith(
+                expect.any(String),
+                'lobby',
+                'user-1',
+                'Clay',
+                'https://pic',
+                'hello',
+                expect.any(Date),
+            );
+        });
+
+        it('falls back to an empty string when socket.data has no pictureUrl', () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), { text: 'hello' });
+
+            expect(emitSpy).toHaveBeenCalledWith('chat-message', expect.objectContaining({ pictureUrl: '' }));
         });
     });
 
