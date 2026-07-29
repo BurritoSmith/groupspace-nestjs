@@ -86,6 +86,10 @@ export interface IRoomRecordingState {
     // The RecordingSession DB row grouping every stream in this start()/stop() lifecycle
     // together, for the future playback component to look up "all streams for session X".
     sessionDbId: string;
+    // When this recording session actually started — surfaced via RecordingService.
+    // getRecordingStartedAt() so a client joining mid-recording (or the 'recording-state'
+    // broadcast) can compute the true elapsed time instead of starting a fresh timer at 0.
+    startedAt: Date;
     // Mutable — starts as the failsafe default, updated in stop() BEFORE teardownRoom()
     // runs, so per-stream GCS uploads (which happen during finalize, i.e. during teardown)
     // use the final, possibly user-renamed value for their <roomName>/<sessionName>/ path.

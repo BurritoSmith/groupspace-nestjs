@@ -12,7 +12,10 @@ describe('RoomService', () => {
     let service: RoomService;
 
     beforeEach(() => {
-        service = new RoomService({} as never); // RecordingService — untouched by the methods under test
+        // isRecording()/getRecordingStartedAt() are the only RecordingService methods joinRoom()
+        // itself calls; every other test in this file exercises methods that never touch
+        // RecordingService at all.
+        service = new RoomService({ isRecording: jest.fn().mockReturnValue(false), getRecordingStartedAt: jest.fn().mockReturnValue(null) } as never);
     });
 
     describe('setMicSelfMuted', () => {
@@ -205,6 +208,55 @@ describe('RoomService', () => {
             const result = await service.joinRoom('peer-2', 'lobby', 'user-2', 'Burr', 'https://pic-2');
 
             expect(result.peers).toEqual([{ peerId: 'peer-1', userId: 'user-1', displayName: 'Clay', pictureUrl: 'https://pic-1', micSelfMuted: false }]);
+        });
+
+        // Regression coverage: a client joining after recording has already started must see
+        // isRecording: true immediately in the join result, not just via a 'recording-state'
+        // broadcast it could never have received — see IJoinRoomResult.isRecording's comment.
+        it('reports isRecording: true when RecordingService says the room is currently recording', async () => {
+            const fakeRecordingService = { isRecording: jest.fn().mockReturnValue(true), getRecordingStartedAt: jest.fn().mockReturnValue(null) };
+            const target = new RoomService(fakeRecordingService as never);
+            seedRouter(target, 'lobby');
+
+            const result = await target.joinRoom('peer-1', 'lobby', 'user-1', 'Clay', 'https://pic');
+
+            expect(result.isRecording).toBe(true);
+            expect(fakeRecordingService.isRecording).toHaveBeenCalledWith('lobby');
+        });
+
+        it('reports isRecording: false when the room is not being recorded', async () => {
+            const fakeRecordingService = { isRecording: jest.fn().mockReturnValue(false), getRecordingStartedAt: jest.fn().mockReturnValue(null) };
+            const target = new RoomService(fakeRecordingService as never);
+            seedRouter(target, 'lobby');
+
+            const result = await target.joinRoom('peer-1', 'lobby', 'user-1', 'Clay', 'https://pic');
+
+            expect(result.isRecording).toBe(false);
+        });
+
+        // Regression coverage: a late joiner's recording timer must reflect the true elapsed
+        // time, not restart from 00:00 — this is what lets the frontend compute that instead of
+        // just knowing recording is active. See IJoinRoomResult.recordingStartedAt's comment.
+        it("reports the recording's actual start time as an ISO string when currently recording", async () => {
+            const startedAt = new Date('2026-07-28T12:00:00.000Z');
+            const fakeRecordingService = { isRecording: jest.fn().mockReturnValue(true), getRecordingStartedAt: jest.fn().mockReturnValue(startedAt) };
+            const target = new RoomService(fakeRecordingService as never);
+            seedRouter(target, 'lobby');
+
+            const result = await target.joinRoom('peer-1', 'lobby', 'user-1', 'Clay', 'https://pic');
+
+            expect(result.recordingStartedAt).toBe('2026-07-28T12:00:00.000Z');
+            expect(fakeRecordingService.getRecordingStartedAt).toHaveBeenCalledWith('lobby');
+        });
+
+        it('reports recordingStartedAt: null when not recording', async () => {
+            const fakeRecordingService = { isRecording: jest.fn().mockReturnValue(false), getRecordingStartedAt: jest.fn().mockReturnValue(null) };
+            const target = new RoomService(fakeRecordingService as never);
+            seedRouter(target, 'lobby');
+
+            const result = await target.joinRoom('peer-1', 'lobby', 'user-1', 'Clay', 'https://pic');
+
+            expect(result.recordingStartedAt).toBeNull();
         });
     });
 });

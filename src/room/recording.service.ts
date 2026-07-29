@@ -76,6 +76,12 @@ export class RecordingService {
         return this.rooms.has(roomName);
     }
 
+    /** When the room's currently-active recording session started, or null if it isn't recording
+     *  — see IJoinRoomResult.recordingStartedAt's comment for why this exists. */
+    getRecordingStartedAt(roomName: string): Date | null {
+        return this.rooms.get(roomName)?.startedAt ?? null;
+    }
+
     /** Most recent recording sessions for a room, for the toolbar's recordings dropdown. */
     async listRecentSessions(roomName: string, limit = 10): Promise<IRecordingSessionSummary[]> {
         const sessions = await this.prisma.recordingSession.findMany({
@@ -210,7 +216,8 @@ export class RecordingService {
         await fs.mkdir(this.sdpScratchDir, { recursive: true });
 
         const sessionDbId = randomUUID();
-        const defaultSessionName = this.buildDefaultSessionName(roomName, new Date());
+        const startedAt = new Date();
+        const defaultSessionName = this.buildDefaultSessionName(roomName, startedAt);
         await this.prisma.recordingSession.create({
             data: {
                 id: sessionDbId,
@@ -226,6 +233,7 @@ export class RecordingService {
             roomName,
             sessionDbId,
             sessionName: defaultSessionName,
+            startedAt,
             videoSessions: new Map(),
             streamNumberCounters: new Map(),
             pendingFinalizations: new Set(),
@@ -248,7 +256,7 @@ export class RecordingService {
             await this.teardownRoom(state);
             throw error;
         }
-        this.events.emit('recording-state', { roomName, isRecording: true });
+        this.events.emit('recording-state', { roomName, isRecording: true, startedAt: startedAt.toISOString() });
     }
 
     /** Stops recording and finalizes every open file for the room. Idempotent — a no-op if not recording.
@@ -272,7 +280,7 @@ export class RecordingService {
         await this.prisma.recordingSession
             .update({ where: { id: state.sessionDbId }, data: { stoppedAt: new Date() } })
             .catch((error: unknown) => this.logger.error(`Failed to finalize recording session ${state.sessionDbId}: ${error}`));
-        this.events.emit('recording-state', { roomName, isRecording: false });
+        this.events.emit('recording-state', { roomName, isRecording: false, startedAt: null });
     }
 
     /** Fire-and-forget hook for a newly created producer — webcam, screen, or mic, each gets its

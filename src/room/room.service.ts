@@ -170,6 +170,8 @@ export class RoomService implements OnModuleInit {
             routerRtpCapabilities: router.rtpCapabilities,
             peers,
             existingProducers,
+            isRecording: this.recordingService.isRecording(roomName),
+            recordingStartedAt: this.recordingService.getRecordingStartedAt(roomName)?.toISOString() ?? null,
         };
     }
 

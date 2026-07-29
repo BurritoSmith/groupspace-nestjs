@@ -13,6 +13,32 @@ describe('RecordingService', () => {
         service = module.get<RecordingService>(RecordingService);
     });
 
+    describe('getRecordingStartedAt', () => {
+        // Regression coverage: a client joining mid-recording needs this to compute the true
+        // elapsed time instead of starting its timer at 00:00 — see IJoinRoomResult
+        // .recordingStartedAt's comment.
+        it('returns the startedAt of the active recording session for a room', () => {
+            const startedAt = new Date('2026-07-28T12:00:00.000Z');
+            (service as unknown as { rooms: Map<string, IRoomRecordingState> }).rooms.set('room1', {
+                roomName: 'room1',
+                sessionDbId: 'session-1',
+                sessionName: 'Test Session',
+                startedAt,
+                videoSessions: new Map(),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+                startQueue: Promise.resolve(),
+                stopQueue: Promise.resolve(),
+            });
+
+            expect(service.getRecordingStartedAt('room1')).toBe(startedAt);
+        });
+
+        it('returns null for a room that is not currently recording', () => {
+            expect(service.getRecordingStartedAt('room1')).toBeNull();
+        });
+    });
+
     describe('buildPlaybackUrls (no RECORDINGS_GCS_BUCKET configured — local dev)', () => {
         const call = (row: Parameters<(typeof service)['buildPlaybackUrls']>[0]) =>
             (service as unknown as { buildPlaybackUrls: typeof service.buildPlaybackUrls }).buildPlaybackUrls(row);
@@ -185,6 +211,7 @@ describe('RecordingService', () => {
                 roomName: 'room1',
                 sessionDbId: 'session-1',
                 sessionName: 'Test Session',
+                startedAt: new Date('2026-07-28T12:00:00.000Z'),
                 videoSessions: new Map([['producer-1', {} as IRecordingVideoSession]]),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
@@ -264,6 +291,7 @@ describe('RecordingService', () => {
                 roomName: 'room1',
                 sessionDbId: 'session-1',
                 sessionName: 'Test Session',
+                startedAt: new Date('2026-07-28T12:00:00.000Z'),
                 videoSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
@@ -336,6 +364,7 @@ describe('RecordingService', () => {
                 roomName: 'room1',
                 sessionDbId: 'session-1',
                 sessionName: 'Test Session',
+                startedAt: new Date('2026-07-28T12:00:00.000Z'),
                 videoSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
