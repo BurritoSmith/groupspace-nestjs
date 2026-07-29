@@ -1,6 +1,6 @@
 import { types as mediasoupTypes } from 'mediasoup';
 import { ChildProcess } from 'node:child_process';
-import { StreamSource } from './room.interfaces';
+import { IChatMessage, StreamSource } from './room.interfaces';
 
 export interface IRecordingProducerInfo {
     producerId: string;
@@ -19,6 +19,7 @@ export interface IRecordingSnapshot {
 export interface IRecordingVideoSession {
     producerId: string;
     peerId: string;
+    userId: string | null;
     displayName: string;
     // Widened to the full StreamSource (webcam/screen/mic) now that mic producers are recorded
     // through this same one-producer-one-session pipeline instead of a separate mixed track.
@@ -76,9 +77,25 @@ export interface IRecordingSummary {
     hasContent: boolean;
 }
 
+/** One marker on the playback timeline. join/leave come from persisted RecordingEvent rows
+ *  (only ever written while a recording is actively running — see RoomGateway's onJoinRoom/
+ *  cleanupPeer); screenshare-start/end are synthesized on read from Recording rows with
+ *  streamType 'screen' (which already have their own startedAt/stoppedAt) — no separate
+ *  persistence needed for those. */
+export interface IRecordingTimelineEvent {
+    type: 'join' | 'leave' | 'screenshare-start' | 'screenshare-end';
+    displayName: string;
+    at: string;
+}
+
 export interface IRecordingSessionDetail extends IRecordingSessionSummary {
     roomName: string;
     recordings: IRecordingSummary[];
+    events: IRecordingTimelineEvent[];
+    /** Only populated by RoomGateway's onGetRecordingSession handler (via ChatService), not by
+     *  RecordingService.getSessionDetail itself — keeps RecordingService/ChatService decoupled,
+     *  same composition pattern already used for userSettings in onJoinRoom. */
+    chatHistory: IChatMessage[];
 }
 
 export interface IRoomRecordingState {

@@ -36,6 +36,25 @@ export class ChatService {
         return this.queryPage({ roomName, sentAt: { lt: before } }, limit);
     }
 
+    /** Every message sent in a room during one recording session's time window — for the playback
+     *  page's read-only chat replay panel. Unlike getRecentHistory/getMessagesBefore (unbounded
+     *  room history, paginated), a session's own window is inherently bounded, so this fetches the
+     *  whole thing in one shot, oldest-first. */
+    async getHistoryForSession(roomName: string, startedAt: Date, stoppedAt: Date | null): Promise<IChatMessage[]> {
+        const rows = await this.prisma.chatMessage.findMany({
+            where: { roomName, sentAt: { gte: startedAt, lte: stoppedAt ?? new Date() } },
+            orderBy: { sentAt: 'asc' },
+        });
+        return rows.map((row) => ({
+            id: row.id,
+            userId: row.userId,
+            displayName: row.displayName,
+            pictureUrl: row.pictureUrl ?? '',
+            text: row.text,
+            at: row.sentAt.toISOString(),
+        }));
+    }
+
     private async queryPage(where: { roomName: string; sentAt?: { lt: Date } }, limit: number): Promise<IChatMessage[]> {
         const rows = await this.prisma.chatMessage.findMany({ where, orderBy: { sentAt: 'desc' }, take: limit });
         return rows.reverse().map((row) => ({

@@ -322,6 +322,11 @@ export class RoomGateway implements OnGatewayDisconnect {
         } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : 'Failed to start recording.' };
         }
+        // Deliberately does NOT log a 'join' event for whoever's already in the room — join/leave
+        // events are now derived from mic producer start/stop (see RecordingService
+        // .notifyProducerCreated/.notifyProducerClosing), which naturally excludes anyone already
+        // producing when recording starts (that goes through start()'s own snapshot path, never
+        // notifyProducerCreated) and naturally covers every later join/leave, however many times.
         return { ok: true };
     }
 
@@ -354,7 +359,15 @@ export class RoomGateway implements OnGatewayDisconnect {
     async onGetRecordingSession(@MessageBody() payload: { id: string }) {
         try {
             const session = await this.recordingService.getSessionDetail(payload.id);
-            return { session };
+            if (!session) {
+                return { session: null };
+            }
+            const chatHistory = await this.chatService.getHistoryForSession(
+                session.roomName,
+                new Date(session.startedAt),
+                session.stoppedAt ? new Date(session.stoppedAt) : null,
+            );
+            return { session: { ...session, chatHistory } };
         } catch (error) {
             this.logger.error(`Failed to load recording session ${payload.id}: ${error}`);
             return { session: null };

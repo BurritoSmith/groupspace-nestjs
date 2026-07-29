@@ -3,6 +3,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RecordingService } from './recording.service';
 import { IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
 
+function createFakePrisma() {
+    return {
+        recordingSession: { findUnique: jest.fn() },
+        recordingEvent: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({}) },
+    };
+}
+
 describe('RecordingService', () => {
     let service: RecordingService;
 
@@ -36,6 +43,224 @@ describe('RecordingService', () => {
 
         it('returns null for a room that is not currently recording', () => {
             expect(service.getRecordingStartedAt('room1')).toBeNull();
+        });
+    });
+
+    describe('logEvent (private — exercised via notifyProducerCreated/notifyProducerClosing below)', () => {
+        it('creates a RecordingEvent row with the given fields', () => {
+            const fakePrisma = createFakePrisma();
+            const recordingService = new RecordingService(fakePrisma as never);
+
+            (
+                recordingService as unknown as {
+                    logEvent: (sessionId: string, type: 'join' | 'leave', peerId: string, userId: string | null, displayName: string) => void;
+                }
+            ).logEvent('session-1', 'join', 'peer-1', 'user-1', 'Alice');
+
+            expect(fakePrisma.recordingEvent.create).toHaveBeenCalledWith({
+                data: { sessionId: 'session-1', type: 'join', peerId: 'peer-1', userId: 'user-1', displayName: 'Alice' },
+            });
+        });
+    });
+
+    describe('notifyProducerCreated / notifyProducerClosing — join/leave timeline events', () => {
+        // enqueueStart/enqueueStop's stagger pause (see RECORDING_STAGGER_MS) schedules a real
+        // setTimeout otherwise, which outlives these synchronous tests and leaves Jest's worker
+        // unable to exit cleanly — same reasoning as the enqueueStart/enqueueStop describe blocks
+        // further down this file.
+        beforeEach(() => jest.useFakeTimers());
+        afterEach(() => jest.useRealTimers());
+
+        function buildState(recordingService: RecordingService): IRoomRecordingState {
+            const state: IRoomRecordingState = {
+                roomName: 'room1',
+                sessionDbId: 'session-1',
+                sessionName: 'Test Session',
+                startedAt: new Date(),
+                videoSessions: new Map(),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+                startQueue: Promise.resolve(),
+                stopQueue: Promise.resolve(),
+            };
+            (recordingService as unknown as { rooms: Map<string, IRoomRecordingState> }).rooms.set('room1', state);
+            return state;
+        }
+
+        it("logs a 'join' event for a newly created mic producer", () => {
+            const fakePrisma = createFakePrisma();
+            const recordingService = new RecordingService(fakePrisma as never);
+            buildState(recordingService);
+            // startVideoSession itself isn't under test here — stub it out so this test only
+            // exercises the join-logging side effect, not the real ffmpeg/mediasoup pipeline.
+            (recordingService as unknown as { startVideoSession: jest.Mock }).startVideoSession = jest.fn().mockResolvedValue(undefined);
+
+            recordingService.notifyProducerCreated('room1', {} as never, {
+                producerId: 'producer-1',
+                peerId: 'peer-1',
+                userId: 'user-1',
+                displayName: 'Alice',
+                source: 'mic',
+            });
+
+            expect(fakePrisma.recordingEvent.create).toHaveBeenCalledWith({
+                data: { sessionId: 'session-1', type: 'join', peerId: 'peer-1', userId: 'user-1', displayName: 'Alice' },
+            });
+        });
+
+        it("does not log anything for a newly created webcam/screen producer", () => {
+            const fakePrisma = createFakePrisma();
+            const recordingService = new RecordingService(fakePrisma as never);
+            buildState(recordingService);
+            (recordingService as unknown as { startVideoSession: jest.Mock }).startVideoSession = jest.fn().mockResolvedValue(undefined);
+
+            recordingService.notifyProducerCreated('room1', {} as never, {
+                producerId: 'producer-1',
+                peerId: 'peer-1',
+                userId: 'user-1',
+                displayName: 'Alice',
+                source: 'webcam',
+            });
+
+            expect(fakePrisma.recordingEvent.create).not.toHaveBeenCalled();
+        });
+
+        it('does not log anything when the room is not being recorded', () => {
+            const fakePrisma = createFakePrisma();
+            const recordingService = new RecordingService(fakePrisma as never);
+
+            recordingService.notifyProducerCreated('room1', {} as never, {
+                producerId: 'producer-1',
+                peerId: 'peer-1',
+                userId: 'user-1',
+                displayName: 'Alice',
+                source: 'mic',
+            });
+
+            expect(fakePrisma.recordingEvent.create).not.toHaveBeenCalled();
+        });
+
+        it("logs a 'leave' event for a closing mic producer", () => {
+            const fakePrisma = createFakePrisma();
+            const recordingService = new RecordingService(fakePrisma as never);
+            const state = buildState(recordingService);
+            // notifyProducerClosing() kicks off a real finalizeVideoSession() otherwise, which
+            // isn't under test here and would fail against this fake session.
+            (recordingService as unknown as { finalizeVideoSession: jest.Mock }).finalizeVideoSession = jest.fn().mockResolvedValue(undefined);
+            state.videoSessions.set('producer-1', {
+                producerId: 'producer-1',
+                peerId: 'peer-1',
+                userId: 'user-1',
+                displayName: 'Alice',
+                source: 'mic',
+            } as IRecordingVideoSession);
+
+            recordingService.notifyProducerClosing('room1', 'producer-1');
+
+            expect(fakePrisma.recordingEvent.create).toHaveBeenCalledWith({
+                data: { sessionId: 'session-1', type: 'leave', peerId: 'peer-1', userId: 'user-1', displayName: 'Alice' },
+            });
+        });
+
+        it('does not log anything for a closing webcam/screen producer', () => {
+            const fakePrisma = createFakePrisma();
+            const recordingService = new RecordingService(fakePrisma as never);
+            const state = buildState(recordingService);
+            (recordingService as unknown as { finalizeVideoSession: jest.Mock }).finalizeVideoSession = jest.fn().mockResolvedValue(undefined);
+            state.videoSessions.set('producer-1', {
+                producerId: 'producer-1',
+                peerId: 'peer-1',
+                userId: 'user-1',
+                displayName: 'Alice',
+                source: 'screen',
+            } as IRecordingVideoSession);
+
+            recordingService.notifyProducerClosing('room1', 'producer-1');
+
+            expect(fakePrisma.recordingEvent.create).not.toHaveBeenCalled();
+        });
+
+        it('logs a fresh join/leave pair for every join/leave cycle of the same person within one recording', () => {
+            const fakePrisma = createFakePrisma();
+            const recordingService = new RecordingService(fakePrisma as never);
+            const state = buildState(recordingService);
+            (recordingService as unknown as { startVideoSession: jest.Mock }).startVideoSession = jest.fn().mockResolvedValue(undefined);
+            // Stubbed the same way — notifyProducerClosing() kicks off a real finalizeVideoSession()
+            // otherwise, which isn't under test here and would fail against these fake sessions.
+            (recordingService as unknown as { finalizeVideoSession: jest.Mock }).finalizeVideoSession = jest.fn().mockResolvedValue(undefined);
+            const micInfo = { producerId: 'producer-1', peerId: 'peer-1', userId: 'user-1', displayName: 'Alice', source: 'mic' as const };
+
+            recordingService.notifyProducerCreated('room1', {} as never, micInfo); // 1st join
+            state.videoSessions.set('producer-1', micInfo as unknown as IRecordingVideoSession);
+            recordingService.notifyProducerClosing('room1', 'producer-1'); // 1st leave
+
+            recordingService.notifyProducerCreated('room1', {} as never, { ...micInfo, producerId: 'producer-2' }); // 2nd join
+            state.videoSessions.set('producer-2', { ...micInfo, producerId: 'producer-2' } as unknown as IRecordingVideoSession);
+            recordingService.notifyProducerClosing('room1', 'producer-2'); // 2nd leave
+
+            const types = (fakePrisma.recordingEvent.create as jest.Mock).mock.calls.map((call) => call[0].data.type);
+            expect(types).toEqual(['join', 'leave', 'join', 'leave']);
+        });
+    });
+
+    describe('getSessionDetail — timeline events', () => {
+        it('merges persisted join/leave events with screenshare-start/end synthesized from screen recordings, sorted by time', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.recordingSession.findUnique.mockResolvedValue({
+                id: 'session-1',
+                name: 'Test Session',
+                roomName: 'room1',
+                startedAt: new Date('2026-07-28T12:00:00.000Z'),
+                stoppedAt: null,
+                recordings: [
+                    {
+                        id: 'rec-1',
+                        filename: 'a.mp4',
+                        streamType: 'screen',
+                        displayName: 'Alice',
+                        userId: 'user-1',
+                        user: { pictureUrl: null },
+                        gcsPath: null,
+                        gcsUploadedAt: null,
+                        thumbnailStatus: null,
+                        thumbnailUpdatedAt: null,
+                        startedAt: new Date('2026-07-28T12:04:00.000Z'),
+                        stoppedAt: new Date('2026-07-28T12:05:00.000Z'),
+                        hasContent: true,
+                    },
+                ],
+            });
+            fakePrisma.recordingEvent.findMany.mockResolvedValue([
+                { type: 'join', displayName: 'Alice', at: new Date('2026-07-28T12:00:00.000Z') },
+                { type: 'leave', displayName: 'Bob', at: new Date('2026-07-28T12:10:00.000Z') },
+            ]);
+            const recordingService = new RecordingService(fakePrisma as never);
+
+            const result = await recordingService.getSessionDetail('session-1');
+
+            expect(result?.events.map((e) => e.type)).toEqual(['join', 'screenshare-start', 'screenshare-end', 'leave']);
+            expect(result?.events[1]).toEqual({
+                type: 'screenshare-start',
+                displayName: 'Alice',
+                at: '2026-07-28T12:04:00.000Z',
+            });
+        });
+
+        it('returns an empty chatHistory — populated by RoomGateway, not RecordingService', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.recordingSession.findUnique.mockResolvedValue({
+                id: 'session-1',
+                name: 'Test Session',
+                roomName: 'room1',
+                startedAt: new Date(),
+                stoppedAt: null,
+                recordings: [],
+            });
+            const recordingService = new RecordingService(fakePrisma as never);
+
+            const result = await recordingService.getSessionDetail('session-1');
+
+            expect(result?.chatHistory).toEqual([]);
         });
     });
 

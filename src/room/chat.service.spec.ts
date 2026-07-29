@@ -71,4 +71,31 @@ describe('ChatService', () => {
             expect(result[0].pictureUrl).toBe('https://pic');
         });
     });
+
+    describe('getHistoryForSession', () => {
+        it('queries messages within [startedAt, stoppedAt], oldest first', async () => {
+            const fakePrisma = createFakePrisma();
+            const service = new ChatService(fakePrisma as never);
+            const startedAt = new Date('2026-07-28T12:00:00.000Z');
+            const stoppedAt = new Date('2026-07-28T13:00:00.000Z');
+
+            await service.getHistoryForSession('lobby', startedAt, stoppedAt);
+
+            expect(fakePrisma.chatMessage.findMany).toHaveBeenCalledWith({
+                where: { roomName: 'lobby', sentAt: { gte: startedAt, lte: stoppedAt } },
+                orderBy: { sentAt: 'asc' },
+            });
+        });
+
+        it('falls back to now for a still-active session (stoppedAt null)', async () => {
+            const fakePrisma = createFakePrisma();
+            const service = new ChatService(fakePrisma as never);
+            const startedAt = new Date('2026-07-28T12:00:00.000Z');
+
+            await service.getHistoryForSession('lobby', startedAt, null);
+
+            const call = fakePrisma.chatMessage.findMany.mock.calls[0][0];
+            expect(call.where.sentAt.lte).toBeInstanceOf(Date);
+        });
+    });
 });

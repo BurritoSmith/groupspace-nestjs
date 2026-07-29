@@ -4,13 +4,13 @@ describe('RoomGateway', () => {
     let gateway: RoomGateway;
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
-    let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock };
+    let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock; closePeer: jest.Mock };
     let fakeChatService: { saveMessage: jest.Mock };
     let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
-        fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn() };
+        fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn(), closePeer: jest.fn() };
         fakeChatService = { saveMessage: jest.fn() };
         fakeUserSettingsService = { save: jest.fn().mockResolvedValue(undefined), getAll: jest.fn().mockResolvedValue([]) };
         gateway = new RoomGateway(
@@ -32,7 +32,7 @@ describe('RoomGateway', () => {
     });
 
     function fakeSocket(data: Record<string, unknown>) {
-        return { id: 'peer-1', data, to: toSpy } as never;
+        return { id: 'peer-1', data, to: toSpy, join: jest.fn().mockResolvedValue(undefined), leave: jest.fn().mockResolvedValue(undefined) } as never;
     }
 
     describe('onUserTyping', () => {
@@ -168,6 +168,63 @@ describe('RoomGateway', () => {
             });
 
             expect(result).toEqual({ ok: false, error: 'DB unavailable' });
+        });
+    });
+
+    describe('onGetRecordingSession', () => {
+        it('merges chatHistory (fetched via ChatService, scoped to the session window) into the returned session', async () => {
+            const session = {
+                id: 'session-1',
+                name: 'Test Session',
+                roomName: 'lobby',
+                startedAt: '2026-07-28T12:00:00.000Z',
+                stoppedAt: '2026-07-28T13:00:00.000Z',
+                recordings: [],
+                events: [],
+                chatHistory: [],
+            };
+            const fakeRecordingService = { events: { on: jest.fn() }, getSessionDetail: jest.fn().mockResolvedValue(session) };
+            const chatHistory = [{ id: 'msg-1', userId: 'user-1', displayName: 'Alice', pictureUrl: '', text: 'hi', at: '2026-07-28T12:05:00.000Z' }];
+            const localChatService = { saveMessage: jest.fn(), getHistoryForSession: jest.fn().mockResolvedValue(chatHistory) };
+            const localGateway = new RoomGateway(
+                fakeRoomService as never,
+                {} as never,
+                {} as never,
+                fakeRecordingService as never,
+                {} as never,
+                fakeUserSettingsService as never,
+                localChatService as never,
+                {} as never,
+            );
+
+            const result = await localGateway.onGetRecordingSession({ id: 'session-1' });
+
+            expect(localChatService.getHistoryForSession).toHaveBeenCalledWith(
+                'lobby',
+                new Date('2026-07-28T12:00:00.000Z'),
+                new Date('2026-07-28T13:00:00.000Z'),
+            );
+            expect(result).toEqual({ session: { ...session, chatHistory } });
+        });
+
+        it('returns { session: null } without touching ChatService when the session does not exist', async () => {
+            const fakeRecordingService = { events: { on: jest.fn() }, getSessionDetail: jest.fn().mockResolvedValue(null) };
+            const localChatService = { saveMessage: jest.fn(), getHistoryForSession: jest.fn() };
+            const localGateway = new RoomGateway(
+                fakeRoomService as never,
+                {} as never,
+                {} as never,
+                fakeRecordingService as never,
+                {} as never,
+                fakeUserSettingsService as never,
+                localChatService as never,
+                {} as never,
+            );
+
+            const result = await localGateway.onGetRecordingSession({ id: 'missing' });
+
+            expect(localChatService.getHistoryForSession).not.toHaveBeenCalled();
+            expect(result).toEqual({ session: null });
         });
     });
 
