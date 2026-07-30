@@ -12,6 +12,8 @@ import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { Server, Socket } from 'socket.io';
 import { getAllowedOrigins } from '../config/cors-origins';
+import { sanitizeAttachment } from './chat-attachment-url';
+import { ChatMediaService } from './chat-media.service';
 import { ChatService, HISTORY_PAGE_SIZE } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
 import { RecordingService } from './recording.service';
@@ -57,6 +59,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         private readonly userSettingsService: UserSettingsService,
         private readonly chatService: ChatService,
         private readonly sessionService: SessionService,
+        private readonly chatMediaService: ChatMediaService,
     ) {
         this.roomService.events.on('active-speakers', ({ roomName, peerIds }: { roomName: string; peerIds: string[] }) => {
             this.server.to(roomName).emit('active-speakers', { peerIds });
@@ -395,7 +398,15 @@ export class RoomGateway implements OnGatewayDisconnect {
     onChatMessage(@ConnectedSocket() socket: Socket, @MessageBody() payload: IChatMessagePayload) {
         const roomName = socket.data.roomName as string;
         const userId = socket.data.userId as string;
-        if (!roomName || !userId || !payload.text?.trim()) {
+        // Untrusted client input — only URLs that actually resolve to our own chat-media storage
+        // (or, for a gif, the Giphy CDN) survive this; anything else is silently dropped rather
+        // than rejecting the whole message, since a stripped attachment is still a usable text
+        // message. See sanitizeAttachment's own comment for what else gets clamped here.
+        const attachments = (payload.attachments ?? [])
+            .map((attachment) => sanitizeAttachment(attachment, this.chatMediaService.publicBase))
+            .filter((attachment) => attachment !== null);
+        const text = payload.text?.trim() ?? '';
+        if (!roomName || !userId || (!text && attachments.length === 0)) {
             return;
         }
         const message: IChatMessage = {
@@ -403,11 +414,21 @@ export class RoomGateway implements OnGatewayDisconnect {
             userId,
             displayName: socket.data.displayName ?? 'Anonymous',
             pictureUrl: (socket.data.pictureUrl as string | undefined) ?? '',
-            text: payload.text.trim(),
+            text,
             at: new Date().toISOString(),
+            ...(attachments.length > 0 ? { attachments } : {}),
         };
         this.server.to(roomName).emit('chat-message', message);
-        this.chatService.saveMessage(message.id, roomName, userId, message.displayName, message.pictureUrl, message.text, new Date(message.at));
+        this.chatService.saveMessage(
+            message.id,
+            roomName,
+            userId,
+            message.displayName,
+            message.pictureUrl,
+            message.text,
+            new Date(message.at),
+            attachments,
+        );
     }
 
     /** Purely ephemeral — no persistence, no ack. socket.to() (not this.server.to()) so the

@@ -7,12 +7,14 @@ describe('RoomGateway', () => {
     let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock; closePeer: jest.Mock };
     let fakeChatService: { saveMessage: jest.Mock };
     let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
+    let fakeChatMediaService: { publicBase: string };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
         fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn(), closePeer: jest.fn() };
         fakeChatService = { saveMessage: jest.fn() };
         fakeUserSettingsService = { save: jest.fn().mockResolvedValue(undefined), getAll: jest.fn().mockResolvedValue([]) };
+        fakeChatMediaService = { publicBase: 'https://storage.googleapis.com/test-chat-media-bucket/' };
         gateway = new RoomGateway(
             fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
@@ -22,6 +24,7 @@ describe('RoomGateway', () => {
             fakeUserSettingsService as never, // userSettingsService
             fakeChatService as never, // chatService
             {} as never, // sessionService
+            fakeChatMediaService as never, // chatMediaService
         );
         emitSpy = jest.fn();
         toSpy = jest.fn().mockReturnValue({ emit: emitSpy });
@@ -129,6 +132,7 @@ describe('RoomGateway', () => {
                 'https://pic',
                 'hello',
                 expect.any(Date),
+                [],
             );
         });
 
@@ -136,6 +140,113 @@ describe('RoomGateway', () => {
             gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), { text: 'hello' });
 
             expect(emitSpy).toHaveBeenCalledWith('chat-message', expect.objectContaining({ pictureUrl: '' }));
+        });
+
+        it('does nothing when text is blank and there are no attachments', () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1' }), { text: '   ' });
+
+            expect(toSpy).not.toHaveBeenCalled();
+            expect(fakeChatService.saveMessage).not.toHaveBeenCalled();
+        });
+
+        it('sends an attachment-only message (blank text) as long as at least one attachment survives sanitization', () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: '',
+                attachments: [
+                    {
+                        id: 'att-1',
+                        kind: 'image',
+                        url: 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo.jpg',
+                        storagePath: 'lobby/2026/07/photo.jpg',
+                        thumbnailUrl: null,
+                        mimeType: 'image/jpeg',
+                        width: 800,
+                        height: 600,
+                        durationMs: null,
+                        sizeBytes: 12345,
+                        name: 'photo.jpg',
+                    },
+                ],
+            });
+
+            expect(emitSpy).toHaveBeenCalledWith(
+                'chat-message',
+                expect.objectContaining({ text: '', attachments: [expect.objectContaining({ id: 'att-1' })] }),
+            );
+        });
+
+        it("drops an attachment whose URL doesn't resolve to our own chat-media storage or the Giphy CDN", () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: 'look at this',
+                attachments: [
+                    {
+                        id: 'att-1',
+                        kind: 'image',
+                        url: 'https://evil.example.com/tracker.png',
+                        storagePath: null,
+                        thumbnailUrl: null,
+                        mimeType: 'image/png',
+                        width: null,
+                        height: null,
+                        durationMs: null,
+                        sizeBytes: null,
+                        name: null,
+                    },
+                ],
+            });
+
+            const broadcast = emitSpy.mock.calls.find((call) => call[0] === 'chat-message')?.[1];
+            expect(broadcast.attachments).toBeUndefined();
+            expect(broadcast.text).toBe('look at this');
+        });
+
+        it('allows a gif attachment hotlinked from the Giphy CDN even though it never touched our own storage', () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: '',
+                attachments: [
+                    {
+                        id: 'att-1',
+                        kind: 'gif',
+                        url: 'https://media3.giphy.com/media/abc123/giphy.gif',
+                        storagePath: null,
+                        thumbnailUrl: null,
+                        mimeType: 'image/gif',
+                        width: 200,
+                        height: 200,
+                        durationMs: null,
+                        sizeBytes: null,
+                        name: null,
+                    },
+                ],
+            });
+
+            const broadcast = emitSpy.mock.calls.find((call) => call[0] === 'chat-message')?.[1];
+            expect(broadcast.attachments).toHaveLength(1);
+        });
+
+        it('clamps an absurd client-supplied width/height rather than passing them through unchecked', () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: '',
+                attachments: [
+                    {
+                        id: 'att-1',
+                        kind: 'image',
+                        url: 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo.jpg',
+                        storagePath: 'lobby/2026/07/photo.jpg',
+                        thumbnailUrl: null,
+                        mimeType: 'image/jpeg',
+                        width: 99999999,
+                        height: -5,
+                        durationMs: null,
+                        sizeBytes: null,
+                        name: null,
+                    },
+                ],
+            });
+
+            const broadcast = emitSpy.mock.calls.find((call) => call[0] === 'chat-message')?.[1];
+            expect(broadcast.attachments[0].width).toBeLessThanOrEqual(8000);
+            expect(broadcast.attachments[0].height).toBeNull();
         });
     });
 

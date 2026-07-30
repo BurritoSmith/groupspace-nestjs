@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { IChatMessage } from './interfaces/room.interfaces';
+import { IChatAttachment, IChatMessage, ILinkPreview } from './interfaces/room.interfaces';
 
 export const HISTORY_PAGE_SIZE = 100;
 
@@ -10,7 +11,16 @@ export class ChatService {
     constructor(private readonly prisma: PrismaService) {}
 
     /** Fire-and-forget from the gateway — a slow/failed DB write must never delay real-time delivery. */
-    saveMessage(id: string, roomName: string, userId: string, displayName: string, pictureUrl: string, text: string, sentAt: Date): void {
+    saveMessage(
+        id: string,
+        roomName: string,
+        userId: string,
+        displayName: string,
+        pictureUrl: string,
+        text: string,
+        sentAt: Date,
+        attachments?: IChatAttachment[],
+    ): void {
         void this.prisma.chatMessage
             .create({
                 data: {
@@ -21,6 +31,7 @@ export class ChatService {
                     pictureUrl: pictureUrl || null,
                     text,
                     sentAt,
+                    attachments: attachments && attachments.length > 0 ? (attachments as unknown as Prisma.InputJsonValue) : undefined,
                 },
             })
             .catch((error: unknown) => this.logger.error(`Failed to persist chat message ${id} in room ${roomName}: ${error}`));
@@ -45,25 +56,33 @@ export class ChatService {
             where: { roomName, sentAt: { gte: startedAt, lte: stoppedAt ?? new Date() } },
             orderBy: { sentAt: 'asc' },
         });
-        return rows.map((row) => ({
-            id: row.id,
-            userId: row.userId,
-            displayName: row.displayName,
-            pictureUrl: row.pictureUrl ?? '',
-            text: row.text,
-            at: row.sentAt.toISOString(),
-        }));
+        return rows.map((row) => this.toChatMessage(row));
     }
 
     private async queryPage(where: { roomName: string; sentAt?: { lt: Date } }, limit: number): Promise<IChatMessage[]> {
         const rows = await this.prisma.chatMessage.findMany({ where, orderBy: { sentAt: 'desc' }, take: limit });
-        return rows.reverse().map((row) => ({
+        return rows.reverse().map((row) => this.toChatMessage(row));
+    }
+
+    private toChatMessage(row: {
+        id: string;
+        userId: string;
+        displayName: string;
+        pictureUrl: string | null;
+        text: string;
+        sentAt: Date;
+        attachments: unknown;
+        linkPreview: unknown;
+    }): IChatMessage {
+        return {
             id: row.id,
             userId: row.userId,
             displayName: row.displayName,
             pictureUrl: row.pictureUrl ?? '',
             text: row.text,
             at: row.sentAt.toISOString(),
-        }));
+            attachments: (row.attachments as IChatAttachment[] | null) ?? undefined,
+            linkPreview: (row.linkPreview as ILinkPreview | null) ?? undefined,
+        };
     }
 }

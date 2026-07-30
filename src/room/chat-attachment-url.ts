@@ -1,0 +1,86 @@
+import { randomUUID } from 'node:crypto';
+import { IChatAttachment } from './interfaces/room.interfaces';
+
+// A gif attachment is either one of our own uploaded files (a user dragged/pasted an actual .gif
+// file — same path as any other image) or a hotlink straight to Giphy's media CDN (the GIF picker
+// never re-uploads the file it lets someone pick). Both are 'gif' kind; only the second needs this
+// second allowlist entry.
+const GIPHY_HOST_PATTERN = /^(media\d*\.giphy\.com|i\.giphy\.com)$/;
+
+const MAX_DIMENSION_PX = 8000;
+const MAX_DURATION_MS = 4 * 60 * 60 * 1000; // generous — real duration limits are an upload-time concern, not this
+const MAX_SIZE_BYTES = 500 * 1024 * 1024; // same — this is just clamping a display hint, not an enforcement point
+const MAX_NAME_LENGTH = 255;
+
+/** True if `url` points at our own chat-media storage (GCS public base, or the local-dev
+ *  `/chat-media/...` static mount) — or, when `allowGiphyCdn`, at Giphy's media CDN. Used both for
+ *  the primary attachment URL and (with kind-appropriate allowGiphyCdn) its thumbnailUrl. */
+function isAllowedMediaUrl(url: string, allowGiphyCdn: boolean, chatMediaPublicBase: string): boolean {
+    if (!url) {
+        return false;
+    }
+    // Local-dev fallback: ChatMediaService hands back a root-relative path when no GCS bucket is
+    // configured (see main.ts's matching /chat-media/ static mount) — there's no host to parse.
+    if (chatMediaPublicBase.startsWith('/')) {
+        return url.startsWith(chatMediaPublicBase);
+    }
+    if (url.startsWith(chatMediaPublicBase)) {
+        return true;
+    }
+    if (!allowGiphyCdn) {
+        return false;
+    }
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'https:' && GIPHY_HOST_PATTERN.test(parsed.hostname);
+    } catch {
+        return false;
+    }
+}
+
+export function isAllowedAttachmentUrl(url: string, kind: IChatAttachment['kind'], chatMediaPublicBase: string): boolean {
+    return isAllowedMediaUrl(url, kind === 'gif', chatMediaPublicBase);
+}
+
+function clampPositiveInt(value: unknown, max: number): number | null {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+        return null;
+    }
+    return Math.min(Math.round(value), max);
+}
+
+/** Validates and normalizes one client-supplied attachment before it's ever persisted or
+ *  broadcast to other peers — returns null (drop it) if the attachment's own URL doesn't resolve
+ *  to somewhere we trust. Every other field is either passed through narrowly-typed or clamped —
+ *  none of it is trusted as anything more than a display hint (see IChatAttachment's own comment). */
+export function sanitizeAttachment(attachment: unknown, chatMediaPublicBase: string): IChatAttachment | null {
+    if (!attachment || typeof attachment !== 'object') {
+        return null;
+    }
+    const candidate = attachment as Partial<IChatAttachment>;
+    if (candidate.kind !== 'image' && candidate.kind !== 'video' && candidate.kind !== 'gif') {
+        return null;
+    }
+    if (typeof candidate.url !== 'string' || !isAllowedAttachmentUrl(candidate.url, candidate.kind, chatMediaPublicBase)) {
+        return null;
+    }
+    const thumbnailUrl =
+        typeof candidate.thumbnailUrl === 'string' && isAllowedMediaUrl(candidate.thumbnailUrl, candidate.kind === 'gif', chatMediaPublicBase)
+            ? candidate.thumbnailUrl
+            : null;
+
+    return {
+        id: typeof candidate.id === 'string' && candidate.id ? candidate.id : randomUUID(),
+        kind: candidate.kind,
+        url: candidate.url,
+        // Nothing of ours to point at for a Giphy hotlink, regardless of what the client sent.
+        storagePath: candidate.kind !== 'gif' && typeof candidate.storagePath === 'string' ? candidate.storagePath : null,
+        thumbnailUrl,
+        mimeType: typeof candidate.mimeType === 'string' ? candidate.mimeType.slice(0, 100) : '',
+        width: clampPositiveInt(candidate.width, MAX_DIMENSION_PX),
+        height: clampPositiveInt(candidate.height, MAX_DIMENSION_PX),
+        durationMs: clampPositiveInt(candidate.durationMs, MAX_DURATION_MS),
+        sizeBytes: clampPositiveInt(candidate.sizeBytes, MAX_SIZE_BYTES),
+        name: typeof candidate.name === 'string' ? candidate.name.slice(0, MAX_NAME_LENGTH) : null,
+    };
+}
