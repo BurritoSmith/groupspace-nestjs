@@ -1,4 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RecordingService } from './recording.service';
 import { IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
@@ -487,4 +491,83 @@ describe('RecordingService', () => {
         });
     });
 
+    describe('waitForRecordingToStart — failsafe for a producer that spawns fine but never delivers data', () => {
+        type WaitFn = (tempPath: string, consumer: { requestKeyFrame: jest.Mock }, requestKeyframes: boolean) => Promise<void>;
+        let tempPath: string;
+
+        beforeEach(async () => {
+            jest.useFakeTimers();
+            tempPath = path.join(os.tmpdir(), `recording-test-${randomUUID()}.recording.webm`);
+        });
+
+        afterEach(async () => {
+            jest.useRealTimers();
+            await fs.unlink(tempPath).catch(() => undefined);
+        });
+
+        function callWait(consumer: { requestKeyFrame: jest.Mock }, requestKeyframes: boolean): Promise<void> {
+            return (service as unknown as { waitForRecordingToStart: WaitFn }).waitForRecordingToStart(tempPath, consumer, requestKeyframes);
+        }
+
+        it('resolves once the temp file has content, without waiting for the full timeout', async () => {
+            const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
+            const promise = callWait(consumer, true);
+            let settled = false;
+            void promise.then(() => (settled = true));
+
+            await jest.advanceTimersByTimeAsync(500); // first poll tick — file still doesn't exist
+            expect(settled).toBe(false);
+
+            await fs.writeFile(tempPath, 'x'); // simulates ffmpeg finally writing its first bytes
+            await jest.advanceTimersByTimeAsync(500); // next poll tick discovers it
+
+            await promise;
+            expect(settled).toBe(true);
+        });
+
+        it('re-requests a keyframe periodically (video) while waiting for data to arrive', async () => {
+            const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
+            const promise = callWait(consumer, true);
+
+            await jest.advanceTimersByTimeAsync(2000);
+            expect(consumer.requestKeyFrame).toHaveBeenCalledTimes(1);
+            await jest.advanceTimersByTimeAsync(2000);
+            expect(consumer.requestKeyFrame).toHaveBeenCalledTimes(2);
+
+            await fs.writeFile(tempPath, 'x');
+            await jest.advanceTimersByTimeAsync(500);
+            await promise;
+        });
+
+        it('never requests a keyframe for audio — Opus has no keyframe concept', async () => {
+            const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
+            const promise = callWait(consumer, false);
+
+            await fs.writeFile(tempPath, 'x');
+            await jest.advanceTimersByTimeAsync(15_000);
+            await promise;
+
+            expect(consumer.requestKeyFrame).not.toHaveBeenCalled();
+        });
+
+        it('rejects once the verification timeout elapses with the file still empty/missing — the actual failsafe', async () => {
+            const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
+            const promise = callWait(consumer, true);
+            const assertion = expect(promise).rejects.toThrow(/No recording data received/);
+
+            await jest.advanceTimersByTimeAsync(15_000);
+
+            await assertion;
+        });
+
+        it('stops polling and stops re-requesting keyframes once settled — no lingering timers', async () => {
+            const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
+            const promise = callWait(consumer, true);
+            await fs.writeFile(tempPath, 'x');
+            await jest.advanceTimersByTimeAsync(500);
+            await promise;
+
+            expect(jest.getTimerCount()).toBe(0);
+        });
+    });
 });

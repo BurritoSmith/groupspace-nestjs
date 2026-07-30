@@ -386,7 +386,10 @@ export class RecordingService {
         // port bookkeeping only tracks what THIS process has handed out, so it can't guarantee
         // a chosen port is actually free at the OS level (e.g. something outside our control
         // transiently holding it). A retry with a different port is far more useful than
-        // failing the whole recording over what's very likely a one-off collision.
+        // failing the whole recording over what's very likely a one-off collision. Also the
+        // failsafe for a producer that spawns everything fine but never actually delivers any
+        // data — waitForRecordingToStart() below throws into this same catch/retry path, so a
+        // stalled attempt gets exactly the same fresh-port treatment as an outright collision.
         const MAX_ATTEMPTS = 3;
         let lastError: unknown;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -418,6 +421,15 @@ export class RecordingService {
                 if (!isAudio) {
                     await consumer.requestKeyFrame();
                 }
+
+                // Confirms real data is actually flowing before this attempt counts as
+                // successful, re-requesting a keyframe in the meantime — see
+                // waitForRecordingToStart's own doc comment for why (a single, possibly-dropped
+                // request previously left a recording silently waiting forever, with nothing
+                // retrying it and nothing noticing — exactly what emptied a real screen-share
+                // recording once already). A timeout here is caught below like any other failed
+                // attempt: fresh port, fresh transport, fresh consumer, fresh ffmpeg.
+                await this.waitForRecordingToStart(this.tempRecordingPath(outputPath), consumer, !isAudio);
 
                 const dbId = randomUUID();
                 const startedAt = new Date();
@@ -515,6 +527,73 @@ export class RecordingService {
             }
         }
         throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+
+    /**
+     * Confirms the temp recording file has actually started receiving real bytes before
+     * startVideoSession treats an attempt as successful. consumer.requestKeyFrame() sends a
+     * single RTCP PLI/FIR request — like any RTP-level signaling packet, delivery isn't
+     * guaranteed over UDP — and until now that was the ONLY request ever made: a dropped or
+     * ignored one left the recording silently waiting forever for a keyframe that was never
+     * coming, with nothing retrying it and nothing noticing. That's exactly what happened to a
+     * real screen-share recording that stopped ~17s later having captured nothing at all.
+     *
+     * Re-requests a keyframe every KEYFRAME_RETRY_MS (video only — audio has no keyframe
+     * concept, every Opus packet is independently decodable) while polling the temp file's size
+     * every POLL_MS, so a dropped request gets a fresh chance quickly instead of relying on
+     * ffmpeg's own eventual GOP cadence (or nothing). Resolves the moment the file has any
+     * content at all. Throws if it's still empty after START_VERIFY_TIMEOUT_MS —
+     * startVideoSession's own MAX_ATTEMPTS retry loop treats that exactly like any other failed
+     * attempt (fresh port/transport/consumer/ffmpeg), which is the actual failsafe: a producer
+     * that doesn't deliver real data on one attempt gets a genuinely fresh one, rather than a
+     * permanently broken, silently-empty recording nothing ever revisits.
+     */
+    private waitForRecordingToStart(tempPath: string, consumer: mediasoupTypes.Consumer, requestKeyframes: boolean): Promise<void> {
+        const START_VERIFY_TIMEOUT_MS = 15_000;
+        const KEYFRAME_RETRY_MS = 2000;
+        const POLL_MS = 500;
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            let pollTimer: ReturnType<typeof setInterval>;
+            let keyframeTimer: ReturnType<typeof setInterval> | undefined;
+            let timeoutTimer: ReturnType<typeof setTimeout>;
+
+            const finish = (error?: Error) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                clearInterval(pollTimer);
+                clearTimeout(timeoutTimer);
+                if (keyframeTimer) {
+                    clearInterval(keyframeTimer);
+                }
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve();
+                }
+            };
+
+            pollTimer = setInterval(() => {
+                fs.stat(tempPath)
+                    .then((stat) => {
+                        if (stat.size > 0) {
+                            finish();
+                        }
+                    })
+                    .catch(() => undefined); // doesn't exist yet on early polls — not an error
+            }, POLL_MS);
+
+            if (requestKeyframes) {
+                keyframeTimer = setInterval(() => void consumer.requestKeyFrame().catch(() => undefined), KEYFRAME_RETRY_MS);
+            }
+
+            timeoutTimer = setTimeout(
+                () => finish(new Error(`No recording data received within ${START_VERIFY_TIMEOUT_MS}ms`)),
+                START_VERIFY_TIMEOUT_MS,
+            );
+        });
     }
 
     /** Pulled out of startVideoSession as its own pure function so it's directly unit-testable
