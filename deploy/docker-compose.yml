@@ -11,6 +11,7 @@ services:
         condition: service_healthy
     volumes:
       - ./recordings:/recordings
+      - ./chat-media:/chat-media
 
   postgres:
     image: postgres:16

@@ -1,10 +1,13 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
+import { ChatMediaController } from './chat-media.controller';
+import { ChatMediaService } from './chat-media.service';
 import { ChatService } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
 import { RecordingService } from './recording.service';
 import { RoomGateway } from './room.gateway';
 import { RoomService } from './room.service';
+import { SessionAuthGuard } from './session-auth.guard';
 import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
 import { UsersService } from './users.service';
@@ -28,6 +31,7 @@ import { UserSettingsService } from './user-settings.service';
             },
         }),
     ],
+    controllers: [ChatMediaController],
     providers: [
         RoomGateway,
         RoomService,
@@ -38,6 +42,8 @@ import { UserSettingsService } from './user-settings.service';
         UserSettingsService,
         ChatService,
         SessionService,
+        ChatMediaService,
+        SessionAuthGuard,
     ],
 })
 export class RoomModule {}

@@ -3,6 +3,37 @@ import { ITurnCredentials } from '../turn-credentials.service';
 
 export type StreamSource = 'webcam' | 'screen' | 'mic';
 
+// Metadata for one uploaded/hotlinked piece of chat media — never the file bytes themselves.
+// `storagePath` is the GCS object path (null for a Giphy-hotlinked gif, which has nothing of ours
+// to point at) — kept alongside `url` specifically so a future switch from public-read objects to
+// signed URLs is a server-only change, without needing to touch anything already persisted.
+// width/height/durationMs/sizeBytes are untrusted layout hints supplied by the uploading client —
+// see isAllowedAttachmentUrl's clamping in room.gateway.ts before any of this reaches other peers.
+export interface IChatAttachment {
+    id: string;
+    kind: 'image' | 'video' | 'gif';
+    url: string;
+    storagePath: string | null;
+    thumbnailUrl: string | null;
+    mimeType: string;
+    width: number | null;
+    height: number | null;
+    durationMs: number | null;
+    sizeBytes: number | null;
+    name: string | null;
+}
+
+// Resolved asynchronously after a message containing a URL is already broadcast — see
+// LinkPreviewService and the 'chat-message-updated' event. `url` is the final URL after
+// redirects, which can differ from whatever substring the sender's text actually contained.
+export interface ILinkPreview {
+    url: string;
+    title: string | null;
+    description: string | null;
+    imageUrl: string | null;
+    siteName: string | null;
+}
+
 export interface IChatMessage {
     id: string;
     userId: string;
@@ -13,6 +44,18 @@ export interface IChatMessage {
     pictureUrl: string;
     text: string;
     at: string;
+    attachments?: IChatAttachment[];
+    linkPreview?: ILinkPreview | null;
+}
+
+// A late patch to an already-broadcast message — currently only ever carries linkPreview (the
+// scrape is too slow to sit on the send path, see LinkPreviewService), but shaped as a general
+// partial so a future server-side addition (e.g. a delayed video thumbnail) can reuse it instead
+// of inventing another single-purpose event.
+export interface IChatMessageUpdate {
+    id: string;
+    linkPreview?: ILinkPreview | null;
+    attachments?: IChatAttachment[];
 }
 
 export interface IPeerSummary {
@@ -136,6 +179,10 @@ export interface ICloseProducerPayload {
 
 export interface IChatMessagePayload {
     text: string;
+    // Untrusted client input — room.gateway.ts's isAllowedAttachmentUrl filters this down to only
+    // URLs that actually point at our own chat-media storage (or the Giphy CDN, for gif kind)
+    // before anything here is persisted or broadcast to other peers.
+    attachments?: IChatAttachment[];
 }
 
 export interface IPeerProducerRecord {
