@@ -1,12 +1,21 @@
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { AppModule } from './app.module';
 import { getAllowedOrigins } from './config/cors-origins';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Opt-in only (see .env's DEV_HTTPS_CERT/DEV_HTTPS_KEY comment) — lets the API be reached as
+  // https:// from a phone testing the frontend's `npm run start:lan` over the LAN. Undefined in
+  // every other case (normal local dev, CI, deployed environments), so app.listen below falls
+  // back to plain HTTP exactly as before.
+  const httpsOptions =
+    process.env.DEV_HTTPS_CERT && process.env.DEV_HTTPS_KEY
+      ? { cert: fs.readFileSync(process.env.DEV_HTTPS_CERT), key: fs.readFileSync(process.env.DEV_HTTPS_KEY) }
+      : undefined;
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { httpsOptions });
   app.enableCors({
     origin: getAllowedOrigins(),
     credentials: true,
