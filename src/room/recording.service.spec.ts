@@ -392,6 +392,84 @@ describe('RecordingService', () => {
         });
     });
 
+    // PlaybackSync lays every stream on one timeline as (recording.startedAt - session.startedAt),
+    // so this value IS the stream's sync offset. Stamping it after the start verification made the
+    // offset absorb however long that verification took — which differs per stream by construction
+    // (audio resolves at the first ~500ms cluster; video also waits for a keyframe whose PLI is
+    // only retried every 2s). Mic and webcam captured at the same instant were filed seconds apart,
+    // and playback faithfully pulled them out of sync.
+    describe('startVideoSession — startedAt is the media start, not the verification finish', () => {
+        const RESUME_TIME = new Date('2026-01-01T00:00:00.000Z');
+        const VERIFY_SECONDS = 3;
+
+        async function runStart(source: 'mic' | 'webcam'): Promise<Date> {
+            const create = jest.fn().mockResolvedValue(null);
+            const recordingService = new RecordingService({ recording: { create } } as never);
+
+            const consumer = {
+                rtpParameters: { codecs: [{ mimeType: 'audio/opus', payloadType: 111, clockRate: 48000, channels: 2 }] },
+                resume: jest.fn().mockResolvedValue(undefined),
+                requestKeyFrame: jest.fn().mockResolvedValue(undefined),
+                close: jest.fn(),
+            };
+            const router = {
+                createPlainTransport: jest.fn().mockResolvedValue({
+                    connect: jest.fn().mockResolvedValue(undefined),
+                    consume: jest.fn().mockResolvedValue(consumer),
+                    close: jest.fn(),
+                }),
+            };
+
+            const internals = recordingService as unknown as {
+                spawnFfmpegAndWaitReady: jest.Mock;
+                waitForRecordingToStart: jest.Mock;
+                generateLiveThumbnail: jest.Mock;
+                startVideoSession: (state: unknown, router: unknown, info: unknown) => Promise<void>;
+            };
+            internals.spawnFfmpegAndWaitReady = jest.fn().mockResolvedValue({ exitCode: null, signalCode: null, kill: jest.fn() });
+            // Stands in for the real verification's variable, per-stream delay.
+            internals.waitForRecordingToStart = jest.fn().mockImplementation(async () => {
+                jest.setSystemTime(new Date(RESUME_TIME.getTime() + VERIFY_SECONDS * 1000));
+            });
+            internals.generateLiveThumbnail = jest.fn().mockResolvedValue(undefined);
+
+            const state = {
+                roomName: 'mackie',
+                sessionDbId: 'session-1',
+                videoSessions: new Map(),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+            };
+
+            jest.setSystemTime(RESUME_TIME);
+            await internals.startVideoSession(state, router, {
+                producerId: `producer-${source}`,
+                peerId: 'peer-1',
+                userId: 'user-1',
+                displayName: 'Clay',
+                source,
+            });
+
+            return (create.mock.calls[0][0] as { data: { startedAt: Date } }).data.startedAt;
+        }
+
+        beforeEach(() => {
+            jest.useFakeTimers();
+        });
+
+        afterEach(() => {
+            jest.useRealTimers();
+        });
+
+        it('files an audio stream at the moment its media started, not seconds later', async () => {
+            expect(await runStart('mic')).toEqual(RESUME_TIME);
+        });
+
+        it('files a video stream at the same reference, so the two stay in sync', async () => {
+            expect(await runStart('webcam')).toEqual(RESUME_TIME);
+        });
+    });
+
     describe('buildRecordingFfmpegArgs', () => {
         type BuildArgs = (sdpPath: string, tempOutputPath: string) => string[];
 

@@ -418,6 +418,9 @@ export class RecordingService {
                 );
 
                 await consumer.resume();
+                // THE reference point for this recording's place on the playback timeline, captured
+                // here rather than after the verification below — see its use as `startedAt`.
+                const mediaStartedAt = new Date();
                 if (!isAudio) {
                     await consumer.requestKeyFrame();
                 }
@@ -432,7 +435,22 @@ export class RecordingService {
                 await this.waitForRecordingToStart(this.tempRecordingPath(outputPath), consumer, !isAudio);
 
                 const dbId = randomUUID();
-                const startedAt = new Date();
+                // Deliberately the time media started flowing (consumer.resume above), NOT the time
+                // the verification above finished.
+                //
+                // PlaybackSync lays every stream on one timeline as
+                // (recording.startedAt - session.startedAt), so this value IS the stream's sync
+                // offset. Stamping it after waitForRecordingToStart made that offset include however
+                // long verification happened to take — and that differs per stream by construction:
+                // audio resolves at the first ~500ms cluster, while video additionally waits for a
+                // keyframe whose PLI is only retried every 2s. Mic and webcam captured at the same
+                // instant were therefore filed as starting up to seconds apart, and playback
+                // faithfully pulled them out of sync. Nothing about the media differed; only the
+                // moment we happened to notice it.
+                //
+                // Fixes screen-share drift for the same reason, which is why this is preferable to
+                // muxing mic and webcam into a single file — that would only ever sync those two.
+                const startedAt = mediaStartedAt;
                 const created = await this.prisma.recording
                     .create({
                         data: {
