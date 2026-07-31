@@ -402,9 +402,19 @@ describe('RecordingService', () => {
         const RESUME_TIME = new Date('2026-01-01T00:00:00.000Z');
         const VERIFY_SECONDS = 3;
 
+        let scratchDir: string;
+
         async function runStart(source: 'mic' | 'webcam'): Promise<Date> {
             const create = jest.fn().mockResolvedValue(null);
             const recordingService = new RecordingService({ recording: { create } } as never);
+            // start() is what normally creates these, and this test calls startVideoSession
+            // directly. Pointed at a fresh temp dir rather than relying on the service's default,
+            // which otherwise only exists on a machine that has already run a recording — the
+            // reason this passed locally and failed on a clean CI runner.
+            Object.assign(recordingService as unknown as { sdpScratchDir: string; recordingsDir: string }, {
+                sdpScratchDir: scratchDir,
+                recordingsDir: scratchDir,
+            });
 
             const consumer = {
                 rtpParameters: { codecs: [{ mimeType: 'audio/opus', payloadType: 111, clockRate: 48000, channels: 2 }] },
@@ -453,12 +463,15 @@ describe('RecordingService', () => {
             return (create.mock.calls[0][0] as { data: { startedAt: Date } }).data.startedAt;
         }
 
-        beforeEach(() => {
+        beforeEach(async () => {
+            scratchDir = path.join(os.tmpdir(), `recording-start-test-${randomUUID()}`);
+            await fs.mkdir(scratchDir, { recursive: true });
             jest.useFakeTimers();
         });
 
-        afterEach(() => {
+        afterEach(async () => {
             jest.useRealTimers();
+            await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => undefined);
         });
 
         it('files an audio stream at the moment its media started, not seconds later', async () => {
