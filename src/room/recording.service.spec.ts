@@ -509,7 +509,16 @@ describe('RecordingService', () => {
             return (service as unknown as { waitForRecordingToStart: WaitFn }).waitForRecordingToStart(tempPath, consumer, requestKeyframes);
         }
 
-        it('resolves once the temp file has content, without waiting for the full timeout', async () => {
+        /** ffmpeg writes the container header the moment it opens the output, then appends media as
+         *  it arrives — so "started" means the file GREW, which takes two polls to observe. */
+        async function writeHeaderThenMedia(): Promise<void> {
+            await fs.writeFile(tempPath, 'HEADER');
+            await jest.advanceTimersByTimeAsync(500); // poll 1 records the header size
+            await fs.writeFile(tempPath, 'HEADER+MEDIA');
+            await jest.advanceTimersByTimeAsync(500); // poll 2 sees it grow
+        }
+
+        it('resolves once the temp file starts growing, without waiting for the full timeout', async () => {
             const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
             const promise = callWait(consumer, true);
             let settled = false;
@@ -518,11 +527,25 @@ describe('RecordingService', () => {
             await jest.advanceTimersByTimeAsync(500); // first poll tick — file still doesn't exist
             expect(settled).toBe(false);
 
-            await fs.writeFile(tempPath, 'x'); // simulates ffmpeg finally writing its first bytes
-            await jest.advanceTimersByTimeAsync(500); // next poll tick discovers it
+            await writeHeaderThenMedia();
 
             await promise;
             expect(settled).toBe(true);
+        });
+
+        // The bug this check exists for: a capture that receives zero RTP still produces a
+        // container header on disk (469 bytes of WebM/EBML in the real case), so treating
+        // "non-empty" as success reported a working recording that held no media at all — and
+        // stopped startVideoSession's retry loop from ever trying again.
+        it('does not treat a header-only file that never grows as a successful start', async () => {
+            const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
+            const promise = callWait(consumer, false);
+            const assertion = expect(promise).rejects.toThrow(/No recording data received/);
+
+            await fs.writeFile(tempPath, 'HEADER'); // written once, then never appended to
+            await jest.advanceTimersByTimeAsync(15_000);
+
+            await assertion;
         });
 
         it('re-requests a keyframe periodically (video) while waiting for data to arrive', async () => {
@@ -534,8 +557,7 @@ describe('RecordingService', () => {
             await jest.advanceTimersByTimeAsync(2000);
             expect(consumer.requestKeyFrame).toHaveBeenCalledTimes(2);
 
-            await fs.writeFile(tempPath, 'x');
-            await jest.advanceTimersByTimeAsync(500);
+            await writeHeaderThenMedia();
             await promise;
         });
 
@@ -543,8 +565,7 @@ describe('RecordingService', () => {
             const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
             const promise = callWait(consumer, false);
 
-            await fs.writeFile(tempPath, 'x');
-            await jest.advanceTimersByTimeAsync(15_000);
+            await writeHeaderThenMedia();
             await promise;
 
             expect(consumer.requestKeyFrame).not.toHaveBeenCalled();
@@ -563,8 +584,7 @@ describe('RecordingService', () => {
         it('stops polling and stops re-requesting keyframes once settled — no lingering timers', async () => {
             const consumer = { requestKeyFrame: jest.fn().mockResolvedValue(undefined) };
             const promise = callWait(consumer, true);
-            await fs.writeFile(tempPath, 'x');
-            await jest.advanceTimersByTimeAsync(500);
+            await writeHeaderThenMedia();
             await promise;
 
             expect(jest.getTimerCount()).toBe(0);

@@ -541,12 +541,12 @@ export class RecordingService {
      * Re-requests a keyframe every KEYFRAME_RETRY_MS (video only — audio has no keyframe
      * concept, every Opus packet is independently decodable) while polling the temp file's size
      * every POLL_MS, so a dropped request gets a fresh chance quickly instead of relying on
-     * ffmpeg's own eventual GOP cadence (or nothing). Resolves the moment the file has any
-     * content at all. Throws if it's still empty after START_VERIFY_TIMEOUT_MS —
-     * startVideoSession's own MAX_ATTEMPTS retry loop treats that exactly like any other failed
-     * attempt (fresh port/transport/consumer/ffmpeg), which is the actual failsafe: a producer
-     * that doesn't deliver real data on one attempt gets a genuinely fresh one, rather than a
-     * permanently broken, silently-empty recording nothing ever revisits.
+     * ffmpeg's own eventual GOP cadence (or nothing). Resolves once the file is GROWING (see the
+     * poll below for why "non-empty" was not good enough). Throws if it never grows within
+     * START_VERIFY_TIMEOUT_MS — startVideoSession's own MAX_ATTEMPTS retry loop treats that
+     * exactly like any other failed attempt (fresh port/transport/consumer/ffmpeg), which is the
+     * actual failsafe: a producer that doesn't deliver real data on one attempt gets a genuinely
+     * fresh one, rather than a permanently broken, silently-empty recording nothing ever revisits.
      */
     private waitForRecordingToStart(tempPath: string, consumer: mediasoupTypes.Consumer, requestKeyframes: boolean): Promise<void> {
         const START_VERIFY_TIMEOUT_MS = 15_000;
@@ -575,12 +575,23 @@ export class RecordingService {
                 }
             };
 
+            // Looks for the file GROWING between polls, not merely being non-empty. ffmpeg writes
+            // the container header the instant it opens the output — 469 bytes of WebM/EBML for an
+            // audio recording — whether or not a single RTP packet ever arrives. A `size > 0` check
+            // therefore reported success for captures that recorded nothing at all, which also
+            // meant the MAX_ATTEMPTS retry below never fired, since attempt 1 always "succeeded".
+            // Growth is container-agnostic and can only happen once real media is being written
+            // (-flush_packets 1 in buildRecordingFfmpegArgs keeps that near-immediate rather than
+            // waiting on a multi-second cluster flush).
+            let lastSize: number | null = null;
             pollTimer = setInterval(() => {
                 fs.stat(tempPath)
                     .then((stat) => {
-                        if (stat.size > 0) {
+                        if (lastSize !== null && stat.size > lastSize) {
                             finish();
+                            return;
                         }
+                        lastSize = stat.size;
                     })
                     .catch(() => undefined); // doesn't exist yet on early polls — not an error
             }, POLL_MS);
