@@ -417,6 +417,22 @@ describe('RecordingService', () => {
             const args = buildArgs('/tmp/a.sdp', '/recordings/a.recording.webm');
             expect(args[args.length - 1]).toBe('/recordings/a.recording.webm');
         });
+
+        // Regression guard with a measured origin: without this, matroskaenc buffers a whole
+        // cluster in memory before AVIO ever sees it, so the temp file stays at its 469-byte
+        // header for ~5s (measured 4.84s mean cluster spacing on a real 27kbps mic capture).
+        // waitForRecordingToStart polls for that file GROWING, so the default cluster interval put
+        // ~5s of latency on every recording start. -flush_packets does not and cannot substitute.
+        it('caps the muxer cluster interval so the temp file grows sub-second, not once per default 5s cluster', () => {
+            const buildArgs = (service as unknown as { buildRecordingFfmpegArgs: BuildArgs }).buildRecordingFfmpegArgs.bind(service);
+            const args = buildArgs('/tmp/a.sdp', '/recordings/a.recording.webm');
+
+            const flagIndex = args.indexOf('-cluster_time_limit');
+            expect(flagIndex).toBeGreaterThan(-1);
+            expect(args[flagIndex + 1]).toBe('500');
+            // A muxer private option — ffmpeg only applies it to the output it precedes.
+            expect(flagIndex).toBeLessThan(args.length - 1);
+        });
     });
 
     describe('pendingFinalizations — race between an individually-stopped stream and stopping the whole recording', () => {

@@ -542,7 +542,9 @@ export class RecordingService {
      * concept, every Opus packet is independently decodable) while polling the temp file's size
      * every POLL_MS, so a dropped request gets a fresh chance quickly instead of relying on
      * ffmpeg's own eventual GOP cadence (or nothing). Resolves once the file is GROWING (see the
-     * poll below for why "non-empty" was not good enough). Throws if it never grows within
+     * poll below for why "non-empty" was not good enough) — which is only sub-second because
+     * buildRecordingFfmpegArgs pins the muxer's cluster interval to 500ms; at matroska's 5s
+     * default this check cannot resolve for ~5s no matter what else is done. Throws if it never grows within
      * START_VERIFY_TIMEOUT_MS — startVideoSession's own MAX_ATTEMPTS retry loop treats that
      * exactly like any other failed attempt (fresh port/transport/consumer/ffmpeg), which is the
      * actual failsafe: a producer that doesn't deliver real data on one attempt gets a genuinely
@@ -551,7 +553,10 @@ export class RecordingService {
     private waitForRecordingToStart(tempPath: string, consumer: mediasoupTypes.Consumer, requestKeyframes: boolean): Promise<void> {
         const START_VERIFY_TIMEOUT_MS = 15_000;
         const KEYFRAME_RETRY_MS = 2000;
-        const POLL_MS = 500;
+        // Half the muxer's 500ms cluster interval (see buildRecordingFfmpegArgs' -cluster_time_limit),
+        // so a completed cluster is noticed on the very next tick rather than up to one full
+        // cluster later.
+        const POLL_MS = 250;
         return new Promise((resolve, reject) => {
             let settled = false;
             let pollTimer: ReturnType<typeof setInterval>;
@@ -580,9 +585,11 @@ export class RecordingService {
             // audio recording — whether or not a single RTP packet ever arrives. A `size > 0` check
             // therefore reported success for captures that recorded nothing at all, which also
             // meant the MAX_ATTEMPTS retry below never fired, since attempt 1 always "succeeded".
-            // Growth is container-agnostic and can only happen once real media is being written
-            // (-flush_packets 1 in buildRecordingFfmpegArgs keeps that near-immediate rather than
-            // waiting on a multi-second cluster flush).
+            // Growth is container-agnostic and can only happen once real media is being written.
+            // It is only PROMPT, though, because buildRecordingFfmpegArgs sets -cluster_time_limit
+            // 500 — an earlier version of this comment credited -flush_packets 1 for that, which
+            // was simply wrong (matroskaenc buffers a whole cluster before AVIO ever sees it) and
+            // cost every recording ~5s of startup until it was measured.
             let lastSize: number | null = null;
             pollTimer = setInterval(() => {
                 fs.stat(tempPath)
@@ -640,10 +647,31 @@ export class RecordingService {
             '-c',
             'copy',
             // Minimizes how much data sits in ffmpeg's userspace I/O buffer rather than being
-            // handed to the OS — narrows the loss window on an abrupt SIGKILL. Cheap now that
-            // there's no libx264 CPU cost competing for cycles.
+            // handed to the OS. Cheap now that there's no libx264 CPU cost competing for cycles.
+            // NOTE: on its own this does far less than it looks like it does — see the cluster
+            // limit below for what actually governs when bytes reach the file.
             '-flush_packets',
             '1',
+            // THE thing that determines how often this file physically grows. matroskaenc
+            // assembles each cluster in an in-memory dynamic buffer (it has to, to compute the
+            // cluster's CRC32) and only hands it to the AVIO layer once the cluster closes — so
+            // -flush_packets has nothing to flush until then, and the file sits at exactly its
+            // 469-byte header until the first cluster completes. At matroska's default 5000ms
+            // cluster_time_limit that's ~5s: measured 4.84s mean cluster spacing on a real 27kbps
+            // mic capture, whose 15-21KB clusters never came near the 32KB size limit.
+            //
+            // That directly gated waitForRecordingToStart's growth check, which physically could
+            // not resolve sooner and so put ~5s of latency on every single recording start.
+            // Closing clusters every 500ms restores a sub-second start while leaving the growth
+            // check's meaning untouched (real media, never just a header), and independently
+            // shrinks how much trailing audio an abruptly-SIGKILLed capture loses with its final
+            // unflushed cluster, from ~5s to ~0.5s.
+            //
+            // Costs nothing in the delivered artifact: remuxToFinalFile re-muxes into the final
+            // file and matroskaenc re-clusters at its own defaults on that pass, so this is a
+            // temp-file-only property. Overhead is ~10-20 bytes of cluster header at 2/sec.
+            '-cluster_time_limit',
+            '500',
             tempOutputPath,
         ];
     }
