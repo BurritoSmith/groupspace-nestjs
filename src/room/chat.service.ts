@@ -37,6 +37,28 @@ export class ChatService {
             .catch((error: unknown) => this.logger.error(`Failed to persist chat message ${id} in room ${roomName}: ${error}`));
     }
 
+    /**
+     * Attaches a scraped link preview to an already-persisted message.
+     *
+     * Separate from saveMessage because the scrape is far too slow to sit on the send path — the
+     * message is broadcast and saved first, and this patches it a moment later (see
+     * room.gateway.ts's follow-up 'chat-message-updated' emit).
+     *
+     * Tolerates the row not existing: saveMessage is itself fire-and-forget, so a preview can
+     * genuinely finish before the insert it belongs to, and neither ordering is worth blocking on
+     * for a decoration.
+     */
+    async updateLinkPreview(id: string, linkPreview: ILinkPreview): Promise<void> {
+        try {
+            await this.prisma.chatMessage.update({
+                where: { id },
+                data: { linkPreview: linkPreview as unknown as Prisma.InputJsonValue },
+            });
+        } catch (error: unknown) {
+            this.logger.warn(`Failed to persist link preview for chat message ${id}: ${error}`);
+        }
+    }
+
     /** Awaited — a read for the join-room ack, not a write; no "don't block" concern applies. Most recent page, oldest-first. */
     async getRecentHistory(roomName: string, limit = HISTORY_PAGE_SIZE): Promise<IChatMessage[]> {
         return this.queryPage({ roomName }, limit);
