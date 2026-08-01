@@ -4,6 +4,7 @@ import { ChatMediaController } from './chat-media.controller';
 import { ChatMediaService } from './chat-media.service';
 import { ChatService } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
+import { LinkPreviewService } from './link-preview.service';
 import { RecordingService } from './recording.service';
 import { RoomGateway } from './room.gateway';
 import { RoomService } from './room.service';
@@ -43,6 +44,7 @@ import { UserSettingsService } from './user-settings.service';
         ChatService,
         SessionService,
         ChatMediaService,
+        LinkPreviewService,
         SessionAuthGuard,
     ],
 })

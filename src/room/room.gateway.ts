@@ -16,6 +16,7 @@ import { sanitizeAttachment } from './chat-attachment-url';
 import { ChatMediaService } from './chat-media.service';
 import { ChatService, HISTORY_PAGE_SIZE } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
+import { LinkPreviewService, extractFirstUrl } from './link-preview.service';
 import { RecordingService } from './recording.service';
 import { RoomService } from './room.service';
 import { SessionService } from './session.service';
@@ -25,6 +26,7 @@ import { UserSettingsService } from './user-settings.service';
 import type {
     IChatMessage,
     IChatMessagePayload,
+    IChatMessageUpdate,
     ICloseProducerPayload,
     IConnectTransportPayload,
     IConsumePayload,
@@ -60,6 +62,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         private readonly chatService: ChatService,
         private readonly sessionService: SessionService,
         private readonly chatMediaService: ChatMediaService,
+        private readonly linkPreviewService: LinkPreviewService,
     ) {
         this.roomService.events.on('active-speakers', ({ roomName, peerIds }: { roomName: string; peerIds: string[] }) => {
             this.server.to(roomName).emit('active-speakers', { peerIds });
@@ -429,6 +432,36 @@ export class RoomGateway implements OnGatewayDisconnect {
             new Date(message.at),
             attachments,
         );
+        this.scrapeLinkPreview(message.id, roomName, text);
+    }
+
+    /**
+     * Kicks off link-preview scraping for a message that has already been delivered.
+     *
+     * Deliberately detached rather than awaited: a scrape is a network round trip to a third party
+     * (plus, when there's an image, a second one and an upload), and no chat message should wait on
+     * a stranger's server to appear. The card arrives via 'chat-message-updated' whenever it's
+     * ready, or never — both are fine.
+     *
+     * A message with no URL costs nothing here; extractFirstUrl is a single regex over text we
+     * already have in hand.
+     */
+    private scrapeLinkPreview(messageId: string, roomName: string, text: string): void {
+        const url = extractFirstUrl(text);
+        if (!url) {
+            return;
+        }
+        void this.linkPreviewService
+            .fetchPreview(url, roomName)
+            .then(async (linkPreview) => {
+                if (!linkPreview) {
+                    return; // nothing worth showing — leave the message exactly as sent
+                }
+                await this.chatService.updateLinkPreview(messageId, linkPreview);
+                const update: IChatMessageUpdate = { id: messageId, linkPreview };
+                this.server.to(roomName).emit('chat-message-updated', update);
+            })
+            .catch((error: unknown) => this.logger.debug(`Link preview scrape failed for message ${messageId}: ${error}`));
     }
 
     /** Purely ephemeral — no persistence, no ack. socket.to() (not this.server.to()) so the

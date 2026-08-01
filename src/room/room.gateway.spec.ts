@@ -5,16 +5,20 @@ describe('RoomGateway', () => {
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
     let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock; closePeer: jest.Mock };
-    let fakeChatService: { saveMessage: jest.Mock };
+    let fakeChatService: { saveMessage: jest.Mock; updateLinkPreview: jest.Mock };
     let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
     let fakeChatMediaService: { publicBase: string };
+    let fakeLinkPreviewService: { fetchPreview: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
         fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn(), closePeer: jest.fn() };
-        fakeChatService = { saveMessage: jest.fn() };
+        fakeChatService = { saveMessage: jest.fn(), updateLinkPreview: jest.fn().mockResolvedValue(undefined) };
         fakeUserSettingsService = { save: jest.fn().mockResolvedValue(undefined), getAll: jest.fn().mockResolvedValue([]) };
         fakeChatMediaService = { publicBase: 'https://storage.googleapis.com/test-chat-media-bucket/' };
+        // Defaults to "no preview" so every existing message test is unaffected by the scrape that
+        // now fires alongside them.
+        fakeLinkPreviewService = { fetchPreview: jest.fn().mockResolvedValue(null) };
         gateway = new RoomGateway(
             fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
@@ -25,6 +29,7 @@ describe('RoomGateway', () => {
             fakeChatService as never, // chatService
             {} as never, // sessionService
             fakeChatMediaService as never, // chatMediaService
+            fakeLinkPreviewService as never, // linkPreviewService
         );
         emitSpy = jest.fn();
         toSpy = jest.fn().mockReturnValue({ emit: emitSpy });
