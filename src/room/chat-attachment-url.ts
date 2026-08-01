@@ -19,14 +19,19 @@ function isAllowedMediaUrl(url: string, allowGiphyCdn: boolean, chatMediaPublicB
     if (!url) {
         return false;
     }
-    // Local-dev fallback: ChatMediaService hands back a root-relative path when no GCS bucket is
-    // configured (see main.ts's matching /chat-media/ static mount) — there's no host to parse.
-    if (chatMediaPublicBase.startsWith('/')) {
-        return url.startsWith(chatMediaPublicBase);
-    }
+    // Covers both forms of "our own storage" without branching: the GCS public base is an absolute
+    // https origin, and the local-dev fallback is the root-relative `/chat-media/` path
+    // ChatMediaService hands back when no bucket is configured (see main.ts's matching static
+    // mount). A prefix test is correct for each — an absolute URL can't start with `/chat-media/`,
+    // and a root-relative one can't start with `https://…`.
     if (url.startsWith(chatMediaPublicBase)) {
         return true;
     }
+    // Deliberately NOT inside an else-branch on the base's shape. This used to return early for the
+    // local-dev base, which made the Giphy allowlist below unreachable in local dev: every
+    // hotlinked GIF was dropped, and a GIF-only message was then discarded entirely by the gateway
+    // (no text, no surviving attachments) with nothing shown to the sender. Whether a Giphy hotlink
+    // is acceptable has nothing to do with where OUR uploads happen to live.
     if (!allowGiphyCdn) {
         return false;
     }

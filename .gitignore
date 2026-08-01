@@ -3,6 +3,8 @@ dist/
 coverage/
 deploy/.env
 .env
+# Edited in place to hold a real Giphy key before running — must never be committable.
+add-giphy-key-to-vm.ps1
 recordings/
 chat-media/
 .claude/settings.local.json

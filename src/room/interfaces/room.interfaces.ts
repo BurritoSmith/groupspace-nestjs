@@ -211,3 +211,17 @@ export interface IPeerState {
     producers: Map<string, IPeerProducerRecord>;
     consumers: Map<string, mediasoupTypes.Consumer>;
 }
+
+/** One GIF as the picker needs it — a narrowed view of a Giphy record, not their wire shape.
+ *  Giphy returns ~40 renditions and a great deal of metadata per GIF; forwarding that verbatim
+ *  would let their response shape become our API's. See GiphyService. */
+export interface IGifSummary {
+    id: string;
+    title: string;
+    /** The rendition actually sent in a message — a ~200px-wide GIF, not the multi-megabyte original. */
+    url: string;
+    /** A smaller rendition for the picker grid, so scrolling results doesn't fetch full-size files. */
+    previewUrl: string;
+    width: number | null;
+    height: number | null;
+}

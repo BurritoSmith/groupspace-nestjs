@@ -50,6 +50,36 @@ describe('isAllowedAttachmentUrl', () => {
         expect(isAllowedAttachmentUrl('https://media3.giphy.com/media/abc/giphy.gif', 'image', GCS_BASE)).toBe(false);
     });
 
+    // Every Giphy case above uses the GCS base, which is why this hole went unnoticed: the
+    // local-dev branch returned early and never reached the Giphy allowlist at all, so hotlinked
+    // GIFs were dropped in local dev — and a GIF-only message, having no text and no surviving
+    // attachment, was then discarded by the gateway with nothing shown to the sender.
+    describe('with the local-dev base (no GCS bucket configured)', () => {
+        it('still allows a Giphy CDN URL for kind "gif"', () => {
+            expect(isAllowedAttachmentUrl('https://media3.giphy.com/media/abc/giphy.gif', 'gif', LOCAL_BASE)).toBe(true);
+            expect(isAllowedAttachmentUrl('https://i.giphy.com/media/abc/giphy.gif', 'gif', LOCAL_BASE)).toBe(true);
+        });
+
+        it('still rejects the Giphy CDN for a non-gif kind', () => {
+            expect(isAllowedAttachmentUrl('https://media3.giphy.com/media/abc/giphy.gif', 'image', LOCAL_BASE)).toBe(false);
+        });
+
+        it('still rejects a Giphy-lookalike host', () => {
+            expect(isAllowedAttachmentUrl('https://giphy.com.evil.example.com/x.gif', 'gif', LOCAL_BASE)).toBe(false);
+        });
+
+        // The prefix test must not become "any absolute URL is fine when the base is relative".
+        it('still rejects an unrelated absolute URL', () => {
+            expect(isAllowedAttachmentUrl('https://evil.example.com/tracker.png', 'image', LOCAL_BASE)).toBe(false);
+            expect(isAllowedAttachmentUrl('https://evil.example.com/tracker.gif', 'gif', LOCAL_BASE)).toBe(false);
+        });
+
+        // A host cannot smuggle itself past a root-relative base by embedding it in a path.
+        it('still rejects a URL that merely contains the local base', () => {
+            expect(isAllowedAttachmentUrl('https://evil.example.com/chat-media/x.jpg', 'image', LOCAL_BASE)).toBe(false);
+        });
+    });
+
     it('rejects an empty URL', () => {
         expect(isAllowedAttachmentUrl('', 'image', GCS_BASE)).toBe(false);
     });
