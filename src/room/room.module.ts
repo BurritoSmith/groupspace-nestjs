@@ -3,6 +3,8 @@ import { JwtModule } from '@nestjs/jwt';
 import { ChatMediaController } from './chat-media.controller';
 import { ChatMediaService } from './chat-media.service';
 import { ChatService } from './chat.service';
+import { GifsController } from './gifs.controller';
+import { GiphyService } from './giphy.service';
 import { GoogleAuthService } from './google-auth.service';
 import { LinkPreviewService } from './link-preview.service';
 import { RecordingService } from './recording.service';
@@ -32,7 +34,7 @@ import { UserSettingsService } from './user-settings.service';
             },
         }),
     ],
-    controllers: [ChatMediaController],
+    controllers: [ChatMediaController, GifsController],
     providers: [
         RoomGateway,
         RoomService,
@@ -45,6 +47,7 @@ import { UserSettingsService } from './user-settings.service';
         SessionService,
         ChatMediaService,
         LinkPreviewService,
+        GiphyService,
         SessionAuthGuard,
     ],
 })
