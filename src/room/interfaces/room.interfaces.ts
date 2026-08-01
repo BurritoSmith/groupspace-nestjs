@@ -69,6 +69,10 @@ export interface IPeerSummary {
 export interface IProducerSummary {
     producerId: string;
     peerId: string;
+    /** The PERSON behind this producer, as distinct from peerId, which identifies one connection.
+     *  Carried so a client can count participants per user rather than per socket — one person
+     *  signed in on a phone and a laptop is two peers but one participant. */
+    userId: string;
     displayName: string;
     source: StreamSource;
     kind: mediasoupTypes.MediaKind;
