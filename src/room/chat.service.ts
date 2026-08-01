@@ -1,9 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { IChatReactionRow, groupReactions } from './chat-reaction-grouping';
 import { IChatAttachment, IChatMessage, ILinkPreview } from './interfaces/room.interfaces';
 
 export const HISTORY_PAGE_SIZE = 100;
+
+/** Pulled with every history query. Only the four columns the grouping needs — a history page can
+ *  carry hundreds of messages, and there's no reason to ship reaction ids and message back-refs
+ *  across for each one. */
+const REACTIONS_INCLUDE = {
+    reactions: { select: { userId: true, displayName: true, emoji: true, createdAt: true } },
+} as const;
 
 @Injectable()
 export class ChatService {
@@ -77,12 +85,18 @@ export class ChatService {
         const rows = await this.prisma.chatMessage.findMany({
             where: { roomName, sentAt: { gte: startedAt, lte: stoppedAt ?? new Date() } },
             orderBy: { sentAt: 'asc' },
+            include: REACTIONS_INCLUDE,
         });
         return rows.map((row) => this.toChatMessage(row));
     }
 
     private async queryPage(where: { roomName: string; sentAt?: { lt: Date } }, limit: number): Promise<IChatMessage[]> {
-        const rows = await this.prisma.chatMessage.findMany({ where, orderBy: { sentAt: 'desc' }, take: limit });
+        const rows = await this.prisma.chatMessage.findMany({
+            where,
+            orderBy: { sentAt: 'desc' },
+            take: limit,
+            include: REACTIONS_INCLUDE,
+        });
         return rows.reverse().map((row) => this.toChatMessage(row));
     }
 
@@ -95,7 +109,12 @@ export class ChatService {
         sentAt: Date;
         attachments: unknown;
         linkPreview: unknown;
+        reactions?: IChatReactionRow[];
     }): IChatMessage {
+        // Folded into groups here rather than by the query: the shape clients render is per-emoji,
+        // and Postgres has no reason to know that. groupReactions is shared with
+        // ChatReactionService so a live toggle and a history page can't order badges differently.
+        const reactions = row.reactions && row.reactions.length > 0 ? groupReactions(row.reactions) : undefined;
         return {
             id: row.id,
             userId: row.userId,
@@ -105,6 +124,7 @@ export class ChatService {
             at: row.sentAt.toISOString(),
             attachments: (row.attachments as IChatAttachment[] | null) ?? undefined,
             linkPreview: (row.linkPreview as ILinkPreview | null) ?? undefined,
+            reactions,
         };
     }
 }

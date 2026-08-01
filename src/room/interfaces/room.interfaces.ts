@@ -34,6 +34,24 @@ export interface ILinkPreview {
     siteName: string | null;
 }
 
+// One person who reacted. displayName is the snapshot stored on the reaction row rather than a
+// join against User, so the "who reacted" panel still names someone who has since left the room.
+export interface IChatReactor {
+    userId: string;
+    displayName: string;
+}
+
+// One emoji and everyone currently holding it on a message, oldest reactor first.
+//
+// Deliberately carries the whole reactor list rather than just a count: the badge count is
+// reactors.length, "did I react" is a userId scan, and the who-reacted panel's names are already
+// here — one field serves all three, with nothing to resolve against a presence roster that may
+// no longer contain the person.
+export interface IChatReactionGroup {
+    emoji: string;
+    reactors: IChatReactor[];
+}
+
 export interface IChatMessage {
     id: string;
     userId: string;
@@ -46,16 +64,24 @@ export interface IChatMessage {
     at: string;
     attachments?: IChatAttachment[];
     linkPreview?: ILinkPreview | null;
+    // Absent rather than empty when nobody has reacted — the overwhelmingly common case, and it
+    // keeps history payloads the size they were before reactions existed.
+    reactions?: IChatReactionGroup[];
 }
 
-// A late patch to an already-broadcast message — currently only ever carries linkPreview (the
-// scrape is too slow to sit on the send path, see LinkPreviewService), but shaped as a general
-// partial so a future server-side addition (e.g. a delayed video thumbnail) can reuse it instead
-// of inventing another single-purpose event.
+// A late patch to an already-broadcast message. Shaped as a general partial keyed by message id so
+// each new kind of after-the-fact change reuses it instead of inventing another single-purpose
+// event. Two travel over it today:
+//   - linkPreview, a server-side decoration (the scrape is too slow to sit on the send path, see
+//     LinkPreviewService)
+//   - reactions, which is user-initiated — the first patch here that isn't the server's own doing.
+// Both are whole-value replacements, which is what the client's merge (spread over the existing
+// message) applies correctly.
 export interface IChatMessageUpdate {
     id: string;
     linkPreview?: ILinkPreview | null;
     attachments?: IChatAttachment[];
+    reactions?: IChatReactionGroup[];
 }
 
 export interface IPeerSummary {

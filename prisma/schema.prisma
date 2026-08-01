@@ -16,9 +16,10 @@ model User {
   createdAt   DateTime @default(now())
   lastSeenAt  DateTime @updatedAt // bumped automatically by Prisma on every update()/upsert()-update
 
-  chatMessages ChatMessage[]
-  recordings   Recording[]
-  settings     UserSetting[]
+  chatMessages  ChatMessage[]
+  chatReactions ChatMessageReaction[]
+  recordings    Recording[]
+  settings      UserSetting[]
 }
 
 // Generic per-user preference storage — every user setting (starting with the microphone
@@ -106,8 +107,33 @@ model ChatMessage {
   // scraping is too slow to sit on the send path), via ChatService.updateLinkPreview + a follow-up
   // 'chat-message-updated' socket event. Absent on the vast majority of rows (most messages have no URL).
 
+  reactions ChatMessageReaction[]
+
   @@index([roomName, sentAt]) // "most recent N in a room" is the only history query needed
   @@index([userId])
+}
+
+// One person's one emoji on one message. A real table rather than another Json column on
+// ChatMessage (which is how attachments/linkPreview are stored) specifically for the @@unique
+// below: toggling has to be correct when the same person double-taps, and two clients can be
+// mid-toggle on the same message at once. A Json array can't express that constraint, so the
+// de-duplication would have to live in application code racing itself.
+//
+// Stacking is allowed: one user can hold several different emoji on the same message, so the
+// unique key includes `emoji` rather than stopping at (messageId, userId).
+model ChatMessageReaction {
+  id          String      @id @default(uuid())
+  messageId   String
+  message     ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User        @relation(fields: [userId], references: [id])
+  displayName String // snapshot at react-time, same reasoning as ChatMessage.displayName — it also
+  // means the "who reacted" list still resolves for someone who has since left the room, with no join.
+  emoji       String
+  createdAt   DateTime    @default(now())
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId]) // "every reaction on this message", which is the only read there is
 }
 
 model Recording {

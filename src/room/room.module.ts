@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { ChatMediaController } from './chat-media.controller';
 import { ChatMediaService } from './chat-media.service';
+import { ChatReactionService } from './chat-reaction.service';
 import { ChatService } from './chat.service';
 import { GifsController } from './gifs.controller';
 import { GiphyService } from './giphy.service';
@@ -44,6 +45,7 @@ import { UserSettingsService } from './user-settings.service';
         UsersService,
         UserSettingsService,
         ChatService,
+        ChatReactionService,
         SessionService,
         ChatMediaService,
         LinkPreviewService,
