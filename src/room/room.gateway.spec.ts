@@ -9,6 +9,7 @@ describe('RoomGateway', () => {
     let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
     let fakeChatMediaService: { publicBase: string };
     let fakeLinkPreviewService: { fetchPreview: jest.Mock };
+    let fakeChatReactionService: { toggle: jest.Mock; listGrouped: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
@@ -19,6 +20,7 @@ describe('RoomGateway', () => {
         // Defaults to "no preview" so every existing message test is unaffected by the scrape that
         // now fires alongside them.
         fakeLinkPreviewService = { fetchPreview: jest.fn().mockResolvedValue(null) };
+        fakeChatReactionService = { toggle: jest.fn().mockResolvedValue(undefined), listGrouped: jest.fn().mockResolvedValue([]) };
         gateway = new RoomGateway(
             fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
@@ -30,6 +32,7 @@ describe('RoomGateway', () => {
             {} as never, // sessionService
             fakeChatMediaService as never, // chatMediaService
             fakeLinkPreviewService as never, // linkPreviewService
+            fakeChatReactionService as never, // chatReactionService
         );
         emitSpy = jest.fn();
         toSpy = jest.fn().mockReturnValue({ emit: emitSpy });
@@ -255,6 +258,102 @@ describe('RoomGateway', () => {
         });
     });
 
+    describe('onChatReaction', () => {
+        const THUMBS_UP = '\u{1F44D}';
+        const joinedSocket = () => fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay Crosland' });
+
+        it('toggles, then broadcasts the whole reaction state to the room', async () => {
+            fakeChatReactionService.listGrouped.mockResolvedValue([
+                { emoji: THUMBS_UP, reactors: [{ userId: 'user-1', displayName: 'Clay Crosland' }] },
+            ]);
+
+            const result = await gateway.onChatReaction(joinedSocket(), { messageId: 'msg-1', emoji: THUMBS_UP });
+
+            expect(fakeChatReactionService.toggle).toHaveBeenCalledWith('msg-1', 'user-1', 'Clay Crosland', THUMBS_UP);
+            expect(toSpy).toHaveBeenCalledWith('lobby');
+            expect(emitSpy).toHaveBeenCalledWith('chat-message-updated', {
+                id: 'msg-1',
+                reactions: [{ emoji: THUMBS_UP, reactors: [{ userId: 'user-1', displayName: 'Clay Crosland' }] }],
+            });
+            expect(result).toEqual({ ok: true });
+        });
+
+        it('broadcasts via this.server.to, so the reactor also receives the confirmed state', async () => {
+            // The sender's own UI updated optimistically; the broadcast is what corrects it. Using
+            // socket.to() here (as the typing handlers do) would leave the reactor's own client the
+            // only one never told the truth.
+            const socket = joinedSocket();
+            await gateway.onChatReaction(socket, { messageId: 'msg-1', emoji: THUMBS_UP });
+
+            expect((socket as unknown as { to: jest.Mock }).to).toBe(toSpy);
+            expect(emitSpy).toHaveBeenCalledWith('chat-message-updated', expect.objectContaining({ id: 'msg-1' }));
+        });
+
+        it('persists before broadcasting', async () => {
+            const order: string[] = [];
+            fakeChatReactionService.toggle.mockImplementation(async () => {
+                order.push('toggle');
+            });
+            emitSpy.mockImplementation(() => order.push('emit'));
+
+            await gateway.onChatReaction(joinedSocket(), { messageId: 'msg-1', emoji: THUMBS_UP });
+
+            expect(order).toEqual(['toggle', 'emit']);
+        });
+
+        it('rejects a socket that has not joined a room', async () => {
+            const result = await gateway.onChatReaction(fakeSocket({ userId: 'user-1' }), { messageId: 'msg-1', emoji: THUMBS_UP });
+
+            expect(result).toEqual({ ok: false });
+            expect(fakeChatReactionService.toggle).not.toHaveBeenCalled();
+            expect(toSpy).not.toHaveBeenCalled();
+        });
+
+        it('rejects a socket with no signed-in user', async () => {
+            const result = await gateway.onChatReaction(fakeSocket({ roomName: 'lobby' }), { messageId: 'msg-1', emoji: THUMBS_UP });
+
+            expect(result).toEqual({ ok: false });
+            expect(fakeChatReactionService.toggle).not.toHaveBeenCalled();
+        });
+
+        it('rejects an emoji that is not one, without touching the database', async () => {
+            const result = await gateway.onChatReaction(joinedSocket(), { messageId: 'msg-1', emoji: '<script>alert(1)</script>' });
+
+            expect(result).toEqual({ ok: false });
+            expect(fakeChatReactionService.toggle).not.toHaveBeenCalled();
+            expect(toSpy).not.toHaveBeenCalled();
+        });
+
+        it('rejects a missing messageId', async () => {
+            const result = await gateway.onChatReaction(joinedSocket(), { emoji: THUMBS_UP });
+
+            expect(result).toEqual({ ok: false });
+            expect(fakeChatReactionService.toggle).not.toHaveBeenCalled();
+        });
+
+        it('acks false and broadcasts nothing when the write fails', async () => {
+            // The realistic cause is a foreign-key violation against a ChatMessage row that isn't
+            // there — saveMessage is fire-and-forget, so that ordering is possible in principle.
+            // Nothing may be broadcast, or every other client shows a reaction the database doesn't
+            // have; the false ack is what makes the reactor's optimistic badge disappear again.
+            fakeChatReactionService.toggle.mockRejectedValue(new Error('FK violation'));
+
+            const result = await gateway.onChatReaction(joinedSocket(), { messageId: 'ghost', emoji: THUMBS_UP });
+
+            expect(result).toEqual({ ok: false });
+            expect(emitSpy).not.toHaveBeenCalled();
+        });
+
+        it('falls back to "Anonymous" when the socket carries no displayName', async () => {
+            await gateway.onChatReaction(fakeSocket({ roomName: 'lobby', userId: 'user-1' }), {
+                messageId: 'msg-1',
+                emoji: THUMBS_UP,
+            });
+
+            expect(fakeChatReactionService.toggle).toHaveBeenCalledWith('msg-1', 'user-1', 'Anonymous', THUMBS_UP);
+        });
+    });
+
     describe('onSaveUserSetting', () => {
         it("saves via UserSettingsService using the userId from socket.data, and acks {ok: true}", async () => {
             const result = await gateway.onSaveUserSetting(fakeSocket({ userId: 'user-1' }), {
@@ -310,7 +409,10 @@ describe('RoomGateway', () => {
                 {} as never,
                 fakeUserSettingsService as never,
                 localChatService as never,
-                {} as never,
+                {} as never, // sessionService
+                {} as never, // chatMediaService
+                {} as never, // linkPreviewService
+                {} as never, // chatReactionService
             );
 
             const result = await localGateway.onGetRecordingSession({ id: 'session-1' });
@@ -334,7 +436,10 @@ describe('RoomGateway', () => {
                 {} as never,
                 fakeUserSettingsService as never,
                 localChatService as never,
-                {} as never,
+                {} as never, // sessionService
+                {} as never, // chatMediaService
+                {} as never, // linkPreviewService
+                {} as never, // chatReactionService
             );
 
             const result = await localGateway.onGetRecordingSession({ id: 'missing' });

@@ -13,6 +13,8 @@ import { Prisma } from '@prisma/client';
 import { Server, Socket } from 'socket.io';
 import { getAllowedOrigins } from '../config/cors-origins';
 import { sanitizeAttachment } from './chat-attachment-url';
+import { sanitizeReactionEmoji } from './chat-reaction-emoji';
+import { ChatReactionService } from './chat-reaction.service';
 import { ChatMediaService } from './chat-media.service';
 import { ChatService, HISTORY_PAGE_SIZE } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
@@ -63,6 +65,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         private readonly sessionService: SessionService,
         private readonly chatMediaService: ChatMediaService,
         private readonly linkPreviewService: LinkPreviewService,
+        private readonly chatReactionService: ChatReactionService,
     ) {
         this.roomService.events.on('active-speakers', ({ roomName, peerIds }: { roomName: string; peerIds: string[] }) => {
             this.server.to(roomName).emit('active-speakers', { peerIds });
@@ -433,6 +436,52 @@ export class RoomGateway implements OnGatewayDisconnect {
             attachments,
         );
         this.scrapeLinkPreview(message.id, roomName, text);
+    }
+
+    /**
+     * Adds or removes this user's reaction on one message, then broadcasts the message's whole
+     * reaction state.
+     *
+     * PERSIST FIRST, THEN BROADCAST — deliberately the opposite of onChatMessage above, which
+     * generates its own id up front precisely so delivery never waits on the insert. A reaction has
+     * no such latency pressure (it's one indexed write, and the sender's own UI has already updated
+     * optimistically), and writing first buys two things: the broadcast is derived from real
+     * database state, so concurrent taps converge instead of racing; and there is no way to show
+     * everyone a reaction whose write then failed and which vanishes on the next refresh.
+     *
+     * It also disposes of the one ordering hazard here. ChatService.saveMessage is fire-and-forget,
+     * so the ChatMessage row a reaction points at may not exist yet. Writing first turns that into
+     * a failed insert and an { ok: false } ack the client reverts, rather than a phantom reaction.
+     *
+     * Auth is the file's usual idiom — read socket.data, bail if it isn't there. No handler in this
+     * gateway uses a guard; socket.data is only ever populated by a successful join-room.
+     */
+    @SubscribeMessage('chat-reaction')
+    async onChatReaction(
+        @ConnectedSocket() socket: Socket,
+        @MessageBody() payload: { messageId?: string; emoji?: string },
+    ): Promise<{ ok: boolean }> {
+        const roomName = socket.data.roomName as string | undefined;
+        const userId = socket.data.userId as string | undefined;
+        const messageId = payload?.messageId;
+        const emoji = sanitizeReactionEmoji(payload?.emoji);
+        if (!roomName || !userId || !emoji || typeof messageId !== 'string' || !messageId) {
+            return { ok: false };
+        }
+        const displayName = (socket.data.displayName as string | undefined) ?? 'Anonymous';
+        try {
+            await this.chatReactionService.toggle(messageId, userId, displayName, emoji);
+            const reactions = await this.chatReactionService.listGrouped(messageId);
+            const update: IChatMessageUpdate = { id: messageId, reactions };
+            this.server.to(roomName).emit('chat-message-updated', update);
+            return { ok: true };
+        } catch (error: unknown) {
+            // Most likely a foreign-key violation against a message that doesn't exist (or hasn't
+            // been inserted yet). Nothing was broadcast, so the client's revert leaves both sides
+            // agreeing that the reaction never happened.
+            this.logger.warn(`Failed to toggle reaction on message ${messageId}: ${error}`);
+            return { ok: false };
+        }
     }
 
     /**
