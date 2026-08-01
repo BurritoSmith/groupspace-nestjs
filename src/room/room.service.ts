@@ -144,6 +144,7 @@ export class RoomService implements OnModuleInit {
                 existingProducers.push({
                     producerId: producer.id,
                     peerId: peer.peerId,
+                    userId: peer.userId,
                     displayName: peer.displayName,
                     source,
                     kind: producer.kind,
@@ -253,6 +254,7 @@ export class RoomService implements OnModuleInit {
         return {
             producerId: producer.id,
             peerId: peer.peerId,
+            userId: peer.userId,
             displayName: peer.displayName,
             source,
             kind,
