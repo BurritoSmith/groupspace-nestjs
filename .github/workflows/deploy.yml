@@ -46,19 +46,42 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      # No node_modules/.git — the VM's own Docker build (see Dockerfile) does its own npm ci
-      # inside the image, and .env/recordings/ on the VM (real secrets, real data) are never part
-      # of this checkout in the first place, so extraction below can't overwrite them.
-      - name: Package the checkout
-        run: tar --exclude=.git --exclude=node_modules -czf /tmp/backend.tar.gz .
+      # `git archive`, NOT `tar` of the working directory. The difference is not cosmetic: a plain
+      # tar packages whatever happens to be sitting in the workspace, and by this point the auth
+      # step above has written a gha-creds-*.json credential file into it. Those were being shipped
+      # to the VM on every single deploy and — because extraction never deletes — accumulating
+      # there: 26 of them had built up before this was found. They are Workload Identity
+      # `external_account` configs rather than service-account keys, so they carry no long-lived
+      # secret and stop working when their workflow run ends, but they had no business leaving the
+      # runner at all.
+      #
+      # An archive of the commit also means the VM gets exactly what is in git and nothing else —
+      # no stray local build output, no editor droppings, and no .env from a workspace that happens
+      # to have one.
+      - name: Package the commit
+        run: git archive --format=tar.gz -o /tmp/backend.tar.gz HEAD
 
       - name: Copy to the VM
         run: gcloud compute scp /tmp/backend.tar.gz "$VM_USER@$VM_NAME:backend.tar.gz" --zone="$VM_ZONE"
 
+      # The prune before extraction is what makes a DELETED file actually disappear. `tar -x` only
+      # adds and overwrites, so anything git dropped survived on the VM indefinitely — which broke a
+      # real deploy: a removed script stayed behind, `COPY . .` swept it into the image, and the
+      # build failed compiling a file that no longer existed in the repo.
+      #
+      # Everything at the top level goes EXCEPT deploy/, which is the one directory holding state
+      # that was never in git and must not be destroyed: .env (real secrets), recordings/ (real
+      # recording files), Caddyfile and turnserver.conf. Its tracked files are overwritten by the
+      # extraction as usual.
+      #
+      # Residual, stated so it isn't a surprise later: a tracked file deleted from inside deploy/
+      # itself would still linger. Nothing there has ever been removed, and widening the prune to
+      # cover it risks the four files above for no benefit.
       - name: Extract and rebuild the docker compose stack
         run: |
           gcloud compute ssh "$VM_USER@$VM_NAME" --zone="$VM_ZONE" --command="
             mkdir -p ~/spaces-backend &&
+            find ~/spaces-backend -mindepth 1 -maxdepth 1 ! -name deploy -exec rm -rf {} + &&
             tar -xzf backend.tar.gz -C ~/spaces-backend &&
             rm -f backend.tar.gz &&
             cd ~/spaces-backend/deploy &&
