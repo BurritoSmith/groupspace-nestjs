@@ -256,6 +256,38 @@ describe('RoomGateway', () => {
             expect(broadcast.attachments[0].width).toBeLessThanOrEqual(8000);
             expect(broadcast.attachments[0].height).toBeNull();
         });
+
+        // Asserts on the BROADCAST rather than on the object the sender handed us: sanitizeAttachment
+        // rebuilds each attachment field-by-field, so a field it doesn't know about vanishes on the
+        // way out with nothing logged. The sender's own optimistic copy still shows the album, so
+        // this only ever breaks for everyone else — exactly the kind of thing no one notices locally.
+        it('carries albumId through to the broadcast so an album groups for every peer, not just the sender', () => {
+            const albumAttachment = (id: string) => ({
+                id,
+                kind: 'image' as const,
+                url: `https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/08/${id}.jpg`,
+                storagePath: `lobby/2026/08/${id}.jpg`,
+                thumbnailUrl: null,
+                mimeType: 'image/jpeg',
+                width: 800,
+                height: 600,
+                durationMs: null,
+                sizeBytes: 1234,
+                name: `${id}.jpg`,
+                albumId: 'album-xyz',
+            });
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: '',
+                attachments: [albumAttachment('att-1'), albumAttachment('att-2'), albumAttachment('att-3')],
+            });
+
+            const broadcast = emitSpy.mock.calls.find((call) => call[0] === 'chat-message')?.[1];
+            expect(broadcast.attachments.map((attachment: { albumId: string | null }) => attachment.albumId)).toEqual([
+                'album-xyz',
+                'album-xyz',
+                'album-xyz',
+            ]);
+        });
     });
 
     describe('onChatReaction', () => {

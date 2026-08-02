@@ -11,6 +11,7 @@ const MAX_DIMENSION_PX = 8000;
 const MAX_DURATION_MS = 4 * 60 * 60 * 1000; // generous — real duration limits are an upload-time concern, not this
 const MAX_SIZE_BYTES = 500 * 1024 * 1024; // same — this is just clamping a display hint, not an enforcement point
 const MAX_NAME_LENGTH = 255;
+const MAX_ALBUM_ID_LENGTH = 64; // a uuid is 36; the slack is for a client that formats it differently
 
 /** True if `url` points at our own chat-media storage (GCS public base, or the local-dev
  *  `/chat-media/...` static mount) — or, when `allowGiphyCdn`, at Giphy's media CDN. Used both for
@@ -87,5 +88,10 @@ export function sanitizeAttachment(attachment: unknown, chatMediaPublicBase: str
         durationMs: clampPositiveInt(candidate.durationMs, MAX_DURATION_MS),
         sizeBytes: clampPositiveInt(candidate.sizeBytes, MAX_SIZE_BYTES),
         name: typeof candidate.name === 'string' ? candidate.name.slice(0, MAX_NAME_LENGTH) : null,
+        // Opaque grouping token, bounded like any other client string. This object literal names
+        // every field explicitly rather than spreading `candidate`, so anything not listed here is
+        // silently dropped on its way to the wire — a new attachment field that isn't added here
+        // fails by quietly not existing for other peers, with nothing logged.
+        albumId: typeof candidate.albumId === 'string' && candidate.albumId ? candidate.albumId.slice(0, MAX_ALBUM_ID_LENGTH) : null,
     };
 }

@@ -16,6 +16,7 @@ function baseAttachment(overrides: Record<string, unknown> = {}) {
         durationMs: null,
         sizeBytes: 12345,
         name: 'photo.jpg',
+        albumId: null,
         ...overrides,
     };
 }
@@ -161,5 +162,34 @@ describe('sanitizeAttachment', () => {
         const result = sanitizeAttachment(baseAttachment({ name: 'x'.repeat(1000) }), GCS_BASE);
 
         expect(result?.name?.length).toBe(255);
+    });
+
+    // This literal names every field explicitly, so a new one that isn't listed is dropped with
+    // nothing logged — an album would simply render as separate attachments for everyone but the
+    // sender, whose optimistic copy still has it.
+    it('keeps the albumId that groups a quick album together', () => {
+        const result = sanitizeAttachment(baseAttachment({ albumId: 'album-abc' }), GCS_BASE);
+
+        expect(result?.albumId).toBe('album-abc');
+    });
+
+    it('yields a null albumId for an ordinary attachment that has none', () => {
+        const result = sanitizeAttachment(baseAttachment({ albumId: undefined }), GCS_BASE);
+
+        expect(result?.albumId).toBeNull();
+    });
+
+    it('drops a non-string albumId rather than passing it through', () => {
+        expect(sanitizeAttachment(baseAttachment({ albumId: 42 }), GCS_BASE)?.albumId).toBeNull();
+        expect(sanitizeAttachment(baseAttachment({ albumId: { id: 'x' } }), GCS_BASE)?.albumId).toBeNull();
+        // An empty string groups nothing, and would otherwise read as "this is an album" everywhere
+        // the client tests for a non-null albumId.
+        expect(sanitizeAttachment(baseAttachment({ albumId: '' }), GCS_BASE)?.albumId).toBeNull();
+    });
+
+    it('truncates an absurdly long albumId', () => {
+        const result = sanitizeAttachment(baseAttachment({ albumId: 'a'.repeat(500) }), GCS_BASE);
+
+        expect(result?.albumId?.length).toBe(64);
     });
 });
