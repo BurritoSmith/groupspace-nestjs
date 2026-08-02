@@ -275,6 +275,7 @@ describe('RoomGateway', () => {
                 sizeBytes: 1234,
                 name: `${id}.jpg`,
                 albumId: 'album-xyz',
+                albumCoverUrl: 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/08/cover.jpg',
             });
             gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
                 text: '',
@@ -287,6 +288,10 @@ describe('RoomGateway', () => {
                 'album-xyz',
                 'album-xyz',
             ]);
+            // The cover rides the same allowlist and has the same failure mode — dropped silently,
+            // and the album falls back to compositing three images per render for everyone but the
+            // sender, whose optimistic copy still has it.
+            expect(broadcast.attachments[0].albumCoverUrl).toBe('https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/08/cover.jpg');
         });
     });
 
