@@ -14,6 +14,13 @@ export function getAllowedOrigins(): string[] {
         // rejects raw IPs outright, and requires https for anything other than localhost.
         'http://192.168.1.222:4200',
         'https://192-168-1-222.sslip.io:4200',
+        // The packaged Electron desktop app. It serves the Angular build from a loopback HTTP
+        // server rather than file://, precisely so it has a real origin — file:// reports `null`,
+        // which Google Identity Services rejects outright. That makes the desktop app a distinct
+        // origin from the deployed site even though it runs the same bundle, so it needs its own
+        // entry here. The port is fixed (not chosen at runtime) because it is part of the origin
+        // registered with Google; see electron/static-server.ts.
+        'http://localhost:41730',
         ...configured,
     ];
 }
