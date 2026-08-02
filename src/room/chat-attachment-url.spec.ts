@@ -17,6 +17,7 @@ function baseAttachment(overrides: Record<string, unknown> = {}) {
         sizeBytes: 12345,
         name: 'photo.jpg',
         albumId: null,
+        albumCoverUrl: null,
         ...overrides,
     };
 }
@@ -191,5 +192,29 @@ describe('sanitizeAttachment', () => {
         const result = sanitizeAttachment(baseAttachment({ albumId: 'a'.repeat(500) }), GCS_BASE);
 
         expect(result?.albumId?.length).toBe(64);
+    });
+
+    it('keeps an album cover that lives in our own storage', () => {
+        const result = sanitizeAttachment(baseAttachment({ albumCoverUrl: `${GCS_BASE}lobby/2026/08/cover.jpg` }), GCS_BASE);
+
+        expect(result?.albumCoverUrl).toBe(`${GCS_BASE}lobby/2026/08/cover.jpg`);
+    });
+
+    /*
+     * A cover is a URL the client hands us, so it goes through the same allowlist as the
+     * attachment's own. Accepting an arbitrary one would let anyone point every album in a room at
+     * a host they control — a tracking pixel at best.
+     */
+    it('drops an album cover pointing anywhere but our own storage', () => {
+        expect(sanitizeAttachment(baseAttachment({ albumCoverUrl: 'https://evil.example.com/cover.jpg' }), GCS_BASE)?.albumCoverUrl).toBeNull();
+        // Not even the Giphy CDN, which IS allowed for a gif's own url — a cover is always our upload.
+        expect(
+            sanitizeAttachment(baseAttachment({ albumCoverUrl: 'https://media1.giphy.com/media/abc/giphy.gif' }), GCS_BASE)?.albumCoverUrl,
+        ).toBeNull();
+    });
+
+    it('yields a null album cover when there is none, or it is not a string', () => {
+        expect(sanitizeAttachment(baseAttachment({ albumCoverUrl: undefined }), GCS_BASE)?.albumCoverUrl).toBeNull();
+        expect(sanitizeAttachment(baseAttachment({ albumCoverUrl: 42 }), GCS_BASE)?.albumCoverUrl).toBeNull();
     });
 });

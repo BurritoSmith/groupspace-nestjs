@@ -93,5 +93,12 @@ export function sanitizeAttachment(attachment: unknown, chatMediaPublicBase: str
         // silently dropped on its way to the wire — a new attachment field that isn't added here
         // fails by quietly not existing for other peers, with nothing logged.
         albumId: typeof candidate.albumId === 'string' && candidate.albumId ? candidate.albumId.slice(0, MAX_ALBUM_ID_LENGTH) : null,
+        // A URL, so it goes through the SAME allowlist as the attachment's own — a cover is an
+        // ordinary upload of ours, and accepting an arbitrary client-supplied URL here would hand
+        // anyone a way to point every album in a room at a host they control.
+        albumCoverUrl:
+            typeof candidate.albumCoverUrl === 'string' && isAllowedMediaUrl(candidate.albumCoverUrl, false, chatMediaPublicBase)
+                ? candidate.albumCoverUrl
+                : null,
     };
 }

@@ -26,6 +26,12 @@ export interface IChatAttachment {
     // ordinary attachment, and absent entirely on rows persisted before albums existed, which reads
     // back as undefined and is falsy either way.
     albumId?: string | null;
+    // A single pre-composited cover for a quick album, uploaded alongside the attachments at send
+    // time. Carried on every attachment of the album (the client stamps them together with
+    // albumId), so rendering never has to look past the first one. Null on ordinary attachments,
+    // and absent on albums sent before covers existed — which fall back to compositing the stack
+    // in CSS, as they always did.
+    albumCoverUrl?: string | null;
 }
 
 // Resolved asynchronously after a message containing a URL is already broadcast — see
