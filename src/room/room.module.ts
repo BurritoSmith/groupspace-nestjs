@@ -15,6 +15,7 @@ import { SessionAuthGuard } from './session-auth.guard';
 import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
 import { UsersService } from './users.service';
+import { UserSettingsController } from './user-settings.controller';
 import { UserSettingsService } from './user-settings.service';
 
 @Module({
@@ -35,7 +36,7 @@ import { UserSettingsService } from './user-settings.service';
             },
         }),
     ],
-    controllers: [ChatMediaController, GifsController],
+    controllers: [ChatMediaController, GifsController, UserSettingsController],
     providers: [
         RoomGateway,
         RoomService,
