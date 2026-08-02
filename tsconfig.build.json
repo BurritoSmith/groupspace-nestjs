@@ -1,5 +1,4 @@
 {
   "extends": "./tsconfig.json",
-  "//scripts": "One-off maintenance scripts, never part of the server. Excluded so `nest build` neither compiles them nor needs their devDependencies (sharp, a native module) to resolve while the Docker image is built — and so nothing lands in dist/ that the production container, installed with --omit=dev, could not actually run.",
-  "exclude": ["node_modules", "test", "dist", "scripts", "**/*spec.ts"]
+  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
 }
