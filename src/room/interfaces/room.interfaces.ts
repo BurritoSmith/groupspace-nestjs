@@ -21,6 +21,11 @@ export interface IChatAttachment {
     durationMs: number | null;
     sizeBytes: number | null;
     name: string | null;
+    // Set to the same opaque id on every attachment of a message the sender chose to send as a
+    // "quick album" — one stacked thumbnail in the list instead of N full-size ones. Null on every
+    // ordinary attachment, and absent entirely on rows persisted before albums existed, which reads
+    // back as undefined and is falsy either way.
+    albumId?: string | null;
 }
 
 // Resolved asynchronously after a message containing a URL is already broadcast — see
