@@ -163,6 +163,9 @@ jobs:
         run: |
           git push --follow-tags origin HEAD:main
           # The release notes are this version's own CHANGELOG section: everything between its
-          # heading and the next one.
-          awk -v v="## \\[$VERSION\\]" '$0 ~ v {found=1; next} found && /^## \[/ {exit} found' CHANGELOG.md > notes.md
+          # heading and the next one. index()==1 rather than a regex match, because a heading is
+          # literally "## [0.28.0]" and every way of escaping those brackets through the shell into
+          # an awk regex ended up building a character class that matched nothing — silently, with
+          # empty release notes as the only symptom.
+          awk -v heading="## [$VERSION]" 'index($0, heading) == 1 {found=1; next} found && index($0, "## [") == 1 {exit} found' CHANGELOG.md > notes.md
           gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md
