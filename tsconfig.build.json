@@ -1,5 +1,4 @@
 {
   "extends": "./tsconfig.json",
-  "//scripts": "One-off backfills live there and import `sharp`, a native module the API deliberately has no runtime dependency on. Excluding them means `nest build` never compiles them, nothing reaches dist/, and the production container (npm ci --omit=dev) has no code in it that would throw on require.",
-  "exclude": ["node_modules", "test", "dist", "scripts", "**/*spec.ts"]
+  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
 }
