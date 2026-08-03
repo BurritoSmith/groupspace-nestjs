@@ -13,10 +13,10 @@ would want a reader to see. See docs/versioning.md.
 
 ## Verification
 
-<!-- Commands run and their result. For behaviour that a test can hold, name the test; for
-     behaviour that only a browser can show, say what to do by hand. -->
+<!-- Commands run and their result. For behaviour that a test can hold, name the test. -->
 
-- [ ] `npx tsc --noEmit -p tsconfig.app.json`
-- [ ] `npx ng test --watch=false`
-- [ ] `npx ng build`
-- [ ] Any new user-facing string is translated in **all nine** locale files
+- [ ] `npx tsc --noEmit`
+- [ ] `npm test`
+- [ ] `npx nest build`
+- [ ] Any new migration has been applied locally with `npx prisma migrate deploy`, not just added
+- [ ] Any change to the socket contract is mirrored in the web client
