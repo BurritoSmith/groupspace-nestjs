@@ -74,6 +74,11 @@ export function sanitizeAttachment(attachment: unknown, chatMediaPublicBase: str
         typeof candidate.thumbnailUrl === 'string' && isAllowedMediaUrl(candidate.thumbnailUrl, candidate.kind === 'gif', chatMediaPublicBase)
             ? candidate.thumbnailUrl
             : null;
+    // allowGiphyCdn is deliberately FALSE here, unlike thumbnailUrl above. A display rendition is
+    // something we generated and uploaded ourselves, so there is no legitimate case for one pointing
+    // at a third-party CDN — including for a gif, which never has one at all.
+    const displayUrl =
+        typeof candidate.displayUrl === 'string' && isAllowedMediaUrl(candidate.displayUrl, false, chatMediaPublicBase) ? candidate.displayUrl : null;
 
     return {
         id: typeof candidate.id === 'string' && candidate.id ? candidate.id : randomUUID(),
@@ -82,6 +87,7 @@ export function sanitizeAttachment(attachment: unknown, chatMediaPublicBase: str
         // Nothing of ours to point at for a Giphy hotlink, regardless of what the client sent.
         storagePath: candidate.kind !== 'gif' && typeof candidate.storagePath === 'string' ? candidate.storagePath : null,
         thumbnailUrl,
+        displayUrl,
         mimeType: typeof candidate.mimeType === 'string' ? candidate.mimeType.slice(0, 100) : '',
         width: clampPositiveInt(candidate.width, MAX_DIMENSION_PX),
         height: clampPositiveInt(candidate.height, MAX_DIMENSION_PX),
