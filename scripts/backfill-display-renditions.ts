@@ -35,6 +35,8 @@
  */
 import { Storage } from '@google-cloud/storage';
 import { Prisma, PrismaClient } from '@prisma/client';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import sharp from 'sharp';
 import { attachmentObjectPath, backfillDisplayBox, displayStoragePath, needsDisplayRendition } from '../src/room/chat-display-backfill';
 import { IChatAttachment } from '../src/room/interfaces/room.interfaces';
@@ -45,18 +47,68 @@ const DISPLAY_QUALITY = 85;
 
 const apply = process.argv.includes('--apply');
 
+/**
+ * Where the images live, and what their URLs are prefixed with.
+ *
+ * Two backends because ChatMediaService itself has two, and they must agree exactly: `publicBase`
+ * here has to match ChatMediaService.publicBase, or the displayUrl this writes gets dropped on the
+ * floor by sanitizeAttachment the next time the message is broadcast — silently, with nothing
+ * logged.
+ */
+interface RenditionStore {
+    readonly publicBase: string;
+    readonly describe: string;
+    read(objectPath: string): Promise<Buffer>;
+    write(objectPath: string, bytes: Buffer): Promise<void>;
+}
+
+function gcsStore(bucketName: string): RenditionStore {
+    const bucket = new Storage().bucket(bucketName);
+    return {
+        publicBase: `https://storage.googleapis.com/${bucketName}/`,
+        describe: `GCS bucket ${bucketName}`,
+        read: async (objectPath) => (await bucket.file(objectPath).download())[0],
+        write: async (objectPath, bytes) => {
+            // Same metadata ChatMediaService.uploadAttachment writes, so a backfilled object is
+            // indistinguishable from an uploaded one to anything downstream.
+            await bucket.file(objectPath).save(bytes, {
+                contentType: 'image/jpeg',
+                resumable: false,
+                metadata: { cacheControl: 'public, max-age=31536000, immutable' },
+            });
+        },
+    };
+}
+
+/**
+ * Local dev, where there is no bucket at all — matching ChatMediaService's own fallback and
+ * main.ts's /chat-media/ static mount.
+ *
+ * Worth having rather than only supporting GCS: it is the only way to exercise this end to end
+ * (sharp, the message walk, the URL-derived paths, the row patching) against real rows before
+ * pointing it at anything that matters.
+ */
+function localStore(directory: string): RenditionStore {
+    return {
+        publicBase: '/chat-media/',
+        describe: `local directory ${directory}`,
+        read: (objectPath) => fs.readFile(path.join(directory, objectPath)),
+        write: async (objectPath, bytes) => {
+            const destination = path.join(directory, objectPath);
+            await fs.mkdir(path.dirname(destination), { recursive: true });
+            await fs.writeFile(destination, bytes);
+        },
+    };
+}
+
 async function main(): Promise<void> {
+    // The same branch ChatMediaService makes: a bucket when one is configured, the local directory
+    // otherwise. Choosing it the same way is what keeps publicBase in agreement with it.
     const bucketName = process.env.CHAT_MEDIA_GCS_BUCKET;
-    if (!bucketName) {
-        throw new Error('CHAT_MEDIA_GCS_BUCKET is not set — there is no bucket to read the images from or write the renditions to.');
-    }
-    // Mirrors ChatMediaService.publicBase exactly. A displayUrl that does not start with this is
-    // dropped on the floor by sanitizeAttachment the next time the message is broadcast, silently
-    // and with nothing logged — so it has to be built the same way, not approximated.
-    const publicBase = `https://storage.googleapis.com/${bucketName}/`;
+    const store = bucketName ? gcsStore(bucketName) : localStore(process.env.CHAT_MEDIA_DIR ?? path.join(process.cwd(), 'chat-media'));
+    const publicBase = store.publicBase;
 
     const prisma = new PrismaClient();
-    const bucket = new Storage().bucket(bucketName);
 
     let scanned = 0;
     let converted = 0;
@@ -72,6 +124,7 @@ async function main(): Promise<void> {
             select: { id: true, attachments: true },
         });
 
+        console.log(`Reading from ${store.describe}, URLs under "${publicBase}".`);
         console.log(`${messages.length} messages carry attachments.${apply ? '' : ' DRY RUN — nothing will be written.'}`);
 
         for (const message of messages) {
@@ -99,8 +152,7 @@ async function main(): Promise<void> {
                 }
 
                 try {
-                    const source = await bucket.file(sourcePath).download();
-                    const image = sharp(source[0]);
+                    const image = sharp(await store.read(sourcePath));
                     const { width, height } = await image.metadata();
                     const box = backfillDisplayBox(width ?? 0, height ?? 0);
                     if (!box) {
@@ -115,13 +167,7 @@ async function main(): Promise<void> {
                     const objectPath = displayStoragePath(sourcePath);
                     if (apply) {
                         const rendition = await image.resize(box.width, box.height).jpeg({ quality: DISPLAY_QUALITY }).toBuffer();
-                        // Same metadata ChatMediaService.uploadAttachment writes, so a backfilled
-                        // object is indistinguishable from an uploaded one to anything downstream.
-                        await bucket.file(objectPath).save(rendition, {
-                            contentType: 'image/jpeg',
-                            resumable: false,
-                            metadata: { cacheControl: 'public, max-age=31536000, immutable' },
-                        });
+                        await store.write(objectPath, rendition);
                     }
 
                     updated.push({ ...attachment, displayUrl: `${publicBase}${objectPath}` });
