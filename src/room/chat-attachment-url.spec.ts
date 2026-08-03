@@ -18,6 +18,7 @@ function baseAttachment(overrides: Record<string, unknown> = {}) {
         name: 'photo.jpg',
         albumId: null,
         albumCoverUrl: null,
+        displayUrl: null,
         ...overrides,
     };
 }
@@ -157,6 +158,47 @@ describe('sanitizeAttachment', () => {
         const result = sanitizeAttachment(baseAttachment({ thumbnailUrl: `${GCS_BASE}lobby/2026/07/poster.jpg` }), GCS_BASE);
 
         expect(result?.thumbnailUrl).toBe(`${GCS_BASE}lobby/2026/07/poster.jpg`);
+    });
+
+    /*
+     * displayUrl is the ~1600px copy the media viewer's stage paints. It goes through the same
+     * allowlist as every other URL here — this object literal names every field explicitly rather
+     * than spreading the candidate, so an unlisted field is silently dropped and a client-supplied
+     * one is never trusted.
+     */
+    it('keeps an allowed displayUrl under the public base', () => {
+        const result = sanitizeAttachment(baseAttachment({ displayUrl: `${GCS_BASE}lobby/2026/08/display.jpg` }), GCS_BASE);
+
+        expect(result?.displayUrl).toBe(`${GCS_BASE}lobby/2026/08/display.jpg`);
+    });
+
+    it('drops a disallowed displayUrl but keeps the rest of the attachment', () => {
+        const result = sanitizeAttachment(baseAttachment({ displayUrl: 'https://evil.example.com/display.jpg' }), GCS_BASE);
+
+        expect(result?.displayUrl).toBeNull();
+        expect(result?.url).toBe(baseAttachment().url);
+    });
+
+    /*
+     * Deliberately stricter than thumbnailUrl, which does allow the Giphy CDN for a gif. A display
+     * rendition is something we generated and uploaded ourselves, so there is no legitimate case for
+     * one pointing at a third-party host — and a gif never has one at all.
+     */
+    it('refuses a displayUrl on the Giphy CDN, even for a gif', () => {
+        const result = sanitizeAttachment(
+            baseAttachment({
+                kind: 'gif',
+                url: 'https://media1.giphy.com/media/abc/giphy.gif',
+                displayUrl: 'https://media1.giphy.com/media/abc/display.gif',
+            }),
+            GCS_BASE,
+        );
+
+        expect(result?.displayUrl).toBeNull();
+    });
+
+    it('leaves displayUrl null when the client sends none', () => {
+        expect(sanitizeAttachment(baseAttachment(), GCS_BASE)?.displayUrl).toBeNull();
     });
 
     it('truncates an absurdly long name rather than persisting it verbatim', () => {

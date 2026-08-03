@@ -32,6 +32,16 @@ export interface IChatAttachment {
     // and absent on albums sent before covers existed — which fall back to compositing the stack
     // in CSS, as they always did.
     albumCoverUrl?: string | null;
+    // A ~1600px copy of an image, generated and uploaded client-side alongside the original, and what
+    // the media viewer's stage actually paints. It sits between thumbnailUrl (768px, far too soft
+    // full-screen) and url (the original, up to MAX_DIMENSION_PX and ~48MB of bitmap once decoded —
+    // a decode heavy enough to make swiping an album stutter on a phone).
+    //
+    // Optional for the same reason albumId and albumCoverUrl above are: it was added later, so rows
+    // persisted before it genuinely have nothing here and read back as undefined. Null/absent for
+    // videos, for gifs, and for images already small enough never to have needed one — all of which
+    // fall back to `url`, which is what every client did before this existed.
+    displayUrl?: string | null;
 }
 
 // Resolved asynchronously after a message containing a URL is already broadcast — see
