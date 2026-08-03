@@ -88,21 +88,27 @@ export interface IChatMessage {
     // Absent rather than empty when nobody has reacted — the overwhelmingly common case, and it
     // keeps history payloads the size they were before reactions existed.
     reactions?: IChatReactionGroup[];
+    // Soft delete — absent/false for the overwhelming majority of messages. True means the
+    // sender deleted it: the row is kept for history, but every client renders a placeholder in
+    // its place instead of the real content. See ChatService.softDelete.
+    deleted?: boolean;
 }
 
 // A late patch to an already-broadcast message. Shaped as a general partial keyed by message id so
 // each new kind of after-the-fact change reuses it instead of inventing another single-purpose
-// event. Two travel over it today:
+// event. Three travel over it today:
 //   - linkPreview, a server-side decoration (the scrape is too slow to sit on the send path, see
 //     LinkPreviewService)
 //   - reactions, which is user-initiated — the first patch here that isn't the server's own doing.
-// Both are whole-value replacements, which is what the client's merge (spread over the existing
+//   - deleted, also user-initiated — see ChatService.softDelete.
+// All are whole-value replacements, which is what the client's merge (spread over the existing
 // message) applies correctly.
 export interface IChatMessageUpdate {
     id: string;
     linkPreview?: ILinkPreview | null;
     attachments?: IChatAttachment[];
     reactions?: IChatReactionGroup[];
+    deleted?: boolean;
 }
 
 export interface IPeerSummary {

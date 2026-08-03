@@ -5,7 +5,7 @@ describe('RoomGateway', () => {
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
     let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock; closePeer: jest.Mock };
-    let fakeChatService: { saveMessage: jest.Mock; updateLinkPreview: jest.Mock };
+    let fakeChatService: { saveMessage: jest.Mock; updateLinkPreview: jest.Mock; softDelete: jest.Mock };
     let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
     let fakeChatMediaService: { publicBase: string };
     let fakeLinkPreviewService: { fetchPreview: jest.Mock };
@@ -14,7 +14,7 @@ describe('RoomGateway', () => {
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
         fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn(), closePeer: jest.fn() };
-        fakeChatService = { saveMessage: jest.fn(), updateLinkPreview: jest.fn().mockResolvedValue(undefined) };
+        fakeChatService = { saveMessage: jest.fn(), updateLinkPreview: jest.fn().mockResolvedValue(undefined), softDelete: jest.fn().mockResolvedValue(true) };
         fakeUserSettingsService = { save: jest.fn().mockResolvedValue(undefined), getAll: jest.fn().mockResolvedValue([]) };
         fakeChatMediaService = { publicBase: 'https://storage.googleapis.com/test-chat-media-bucket/' };
         // Defaults to "no preview" so every existing message test is unaffected by the scrape that
@@ -388,6 +388,73 @@ describe('RoomGateway', () => {
             });
 
             expect(fakeChatReactionService.toggle).toHaveBeenCalledWith('msg-1', 'user-1', 'Anonymous', THUMBS_UP);
+        });
+    });
+
+    describe('onChatMessageDelete', () => {
+        const joinedSocket = () => fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay Crosland' });
+
+        it('soft-deletes, then broadcasts deleted: true to the room', async () => {
+            const result = await gateway.onChatMessageDelete(joinedSocket(), { messageId: 'msg-1' });
+
+            expect(fakeChatService.softDelete).toHaveBeenCalledWith('msg-1', 'user-1');
+            expect(toSpy).toHaveBeenCalledWith('lobby');
+            expect(emitSpy).toHaveBeenCalledWith('chat-message-updated', { id: 'msg-1', deleted: true });
+            expect(result).toEqual({ ok: true });
+        });
+
+        it('broadcasts via this.server.to, so the deleter also receives the confirmed state', async () => {
+            const socket = joinedSocket();
+            await gateway.onChatMessageDelete(socket, { messageId: 'msg-1' });
+
+            expect((socket as unknown as { to: jest.Mock }).to).toBe(toSpy);
+        });
+
+        it('persists before broadcasting', async () => {
+            const order: string[] = [];
+            fakeChatService.softDelete.mockImplementation(async () => {
+                order.push('softDelete');
+                return true;
+            });
+            emitSpy.mockImplementation(() => order.push('emit'));
+
+            await gateway.onChatMessageDelete(joinedSocket(), { messageId: 'msg-1' });
+
+            expect(order).toEqual(['softDelete', 'emit']);
+        });
+
+        it('rejects a socket that has not joined a room', async () => {
+            const result = await gateway.onChatMessageDelete(fakeSocket({ userId: 'user-1' }), { messageId: 'msg-1' });
+
+            expect(result).toEqual({ ok: false });
+            expect(fakeChatService.softDelete).not.toHaveBeenCalled();
+            expect(toSpy).not.toHaveBeenCalled();
+        });
+
+        it('rejects a socket with no signed-in user', async () => {
+            const result = await gateway.onChatMessageDelete(fakeSocket({ roomName: 'lobby' }), { messageId: 'msg-1' });
+
+            expect(result).toEqual({ ok: false });
+            expect(fakeChatService.softDelete).not.toHaveBeenCalled();
+        });
+
+        it('rejects a missing messageId', async () => {
+            const result = await gateway.onChatMessageDelete(joinedSocket(), {});
+
+            expect(result).toEqual({ ok: false });
+            expect(fakeChatService.softDelete).not.toHaveBeenCalled();
+        });
+
+        // Not found, or someone else's message — ChatService.softDelete's updateMany({ where: { id,
+        // userId } }) can't tell the two apart, and the gateway doesn't need to: either way, this
+        // socket didn't just delete a message, and nothing should be broadcast.
+        it('acks false and broadcasts nothing when softDelete reports no row matched', async () => {
+            fakeChatService.softDelete.mockResolvedValue(false);
+
+            const result = await gateway.onChatMessageDelete(joinedSocket(), { messageId: 'someone-elses-msg' });
+
+            expect(result).toEqual({ ok: false });
+            expect(emitSpy).not.toHaveBeenCalled();
         });
     });
 

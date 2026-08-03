@@ -5,6 +5,7 @@ function createFakePrisma() {
         chatMessage: {
             create: jest.fn().mockResolvedValue({}),
             findMany: jest.fn().mockResolvedValue([]),
+            updateMany: jest.fn().mockResolvedValue({ count: 0 }),
         },
     };
 }
@@ -84,6 +85,18 @@ describe('ChatService', () => {
     });
 
     describe('getRecentHistory', () => {
+        // A deleted message is removed from the conversation, not merely flagged — see softDelete's
+        // own comment. A fresh page load (or a rejoin) must never bring one back.
+        it('excludes deleted messages', async () => {
+            const fakePrisma = createFakePrisma();
+            const service = new ChatService(fakePrisma as never);
+
+            await service.getRecentHistory('lobby');
+
+            const call = fakePrisma.chatMessage.findMany.mock.calls[0][0];
+            expect(call.where).toEqual({ roomName: 'lobby', deleted: false });
+        });
+
         it('maps a null pictureUrl (a message sent before this column existed) to an empty string', async () => {
             const fakePrisma = createFakePrisma();
             fakePrisma.chatMessage.findMany.mockResolvedValue([
@@ -144,6 +157,31 @@ describe('ChatService', () => {
             expect(result[0].linkPreview).toBeUndefined();
         });
 
+        // So scrollback and a rejoining user see the placeholder too, not just a live socket patch.
+        it('surfaces deleted: true for a soft-deleted row', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.chatMessage.findMany.mockResolvedValue([
+                { id: 'msg-1', userId: 'user-1', displayName: 'Clay', pictureUrl: null, text: 'oops', sentAt: new Date('2026-07-28T12:00:00.000Z'), deleted: true },
+            ]);
+            const service = new ChatService(fakePrisma as never);
+
+            const result = await service.getRecentHistory('lobby');
+
+            expect(result[0].deleted).toBe(true);
+        });
+
+        it('leaves deleted undefined for an ordinary row, not false', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.chatMessage.findMany.mockResolvedValue([
+                { id: 'msg-1', userId: 'user-1', displayName: 'Clay', pictureUrl: null, text: 'hi', sentAt: new Date('2026-07-28T12:00:00.000Z'), deleted: false },
+            ]);
+            const service = new ChatService(fakePrisma as never);
+
+            const result = await service.getRecentHistory('lobby');
+
+            expect(result[0].deleted).toBeUndefined();
+        });
+
         it('passes through a real pictureUrl unchanged', async () => {
             const fakePrisma = createFakePrisma();
             fakePrisma.chatMessage.findMany.mockResolvedValue([
@@ -174,7 +212,7 @@ describe('ChatService', () => {
             await service.getHistoryForSession('lobby', startedAt, stoppedAt);
 
             expect(fakePrisma.chatMessage.findMany).toHaveBeenCalledWith({
-                where: { roomName: 'lobby', sentAt: { gte: startedAt, lte: stoppedAt } },
+                where: { roomName: 'lobby', sentAt: { gte: startedAt, lte: stoppedAt }, deleted: false },
                 orderBy: { sentAt: 'asc' },
                 include: expect.objectContaining({ reactions: expect.anything() }),
             });
@@ -189,6 +227,43 @@ describe('ChatService', () => {
 
             const call = fakePrisma.chatMessage.findMany.mock.calls[0][0];
             expect(call.where.sentAt.lte).toBeInstanceOf(Date);
+        });
+    });
+
+    describe('softDelete', () => {
+        // Authorization IS the write: updateMany only ever touches a row matching BOTH id and
+        // userId, so the affected-row count is the whole answer to "did this succeed and was it
+        // theirs to delete" — same idiom ChatReactionService.toggle already uses.
+        it('scopes the update to the given message id AND user id', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.chatMessage.updateMany.mockResolvedValue({ count: 1 });
+            const service = new ChatService(fakePrisma as never);
+
+            await service.softDelete('msg-1', 'user-1');
+
+            expect(fakePrisma.chatMessage.updateMany).toHaveBeenCalledWith({
+                where: { id: 'msg-1', userId: 'user-1' },
+                data: { deleted: true },
+            });
+        });
+
+        it('resolves true when a row was actually updated', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.chatMessage.updateMany.mockResolvedValue({ count: 1 });
+            const service = new ChatService(fakePrisma as never);
+
+            await expect(service.softDelete('msg-1', 'user-1')).resolves.toBe(true);
+        });
+
+        // Covers both "no such message" and "that message belongs to someone else" — updateMany's
+        // where clause can't distinguish them, and neither should the caller: either way, this
+        // user didn't just delete a message.
+        it('resolves false when no row matched (not found, or not this user\'s own message)', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.chatMessage.updateMany.mockResolvedValue({ count: 0 });
+            const service = new ChatService(fakePrisma as never);
+
+            await expect(service.softDelete('msg-1', 'someone-elses-user-id')).resolves.toBe(false);
         });
     });
 

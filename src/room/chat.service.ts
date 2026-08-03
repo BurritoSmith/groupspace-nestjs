@@ -80,24 +80,49 @@ export class ChatService {
     /** Every message sent in a room during one recording session's time window — for the playback
      *  page's read-only chat replay panel. Unlike getRecentHistory/getMessagesBefore (unbounded
      *  room history, paginated), a session's own window is inherently bounded, so this fetches the
-     *  whole thing in one shot, oldest-first. */
+     *  whole thing in one shot, oldest-first. Excludes deleted messages, same as the live history —
+     *  see queryPage's own comment. */
     async getHistoryForSession(roomName: string, startedAt: Date, stoppedAt: Date | null): Promise<IChatMessage[]> {
         const rows = await this.prisma.chatMessage.findMany({
-            where: { roomName, sentAt: { gte: startedAt, lte: stoppedAt ?? new Date() } },
+            where: { roomName, sentAt: { gte: startedAt, lte: stoppedAt ?? new Date() }, deleted: false },
             orderBy: { sentAt: 'asc' },
             include: REACTIONS_INCLUDE,
         });
         return rows.map((row) => this.toChatMessage(row));
     }
 
+    /** `deleted: false` on every history query — a soft-deleted message is a database concern only
+     *  (see softDelete's own comment), not something a fresh page load or a later rejoin should ever
+     *  see. A client already viewing the room when a delete happens instead reacts to the live
+     *  'chat-message-updated' broadcast — see RoomGateway.onChatMessageDelete and Chat.messages on
+     *  the frontend, which filters a flagged message out of what it renders. */
     private async queryPage(where: { roomName: string; sentAt?: { lt: Date } }, limit: number): Promise<IChatMessage[]> {
         const rows = await this.prisma.chatMessage.findMany({
-            where,
+            where: { ...where, deleted: false },
             orderBy: { sentAt: 'desc' },
             take: limit,
             include: REACTIONS_INCLUDE,
         });
         return rows.reverse().map((row) => this.toChatMessage(row));
+    }
+
+    /**
+     * Soft-deletes a message — flips `deleted` rather than removing the row, so the underlying
+     * record survives, but every history query above excludes it from that point on: the sender's
+     * own request was to remove it from the conversation, not merely mark it, so nothing renders a
+     * "deleted" placeholder in its place either. A client already viewing the room when this happens
+     * gets the same result via the live 'chat-message-updated' broadcast below.
+     *
+     * Authorization IS the write: `updateMany({ where: { id, userId } })` only touches a row that
+     * both exists AND belongs to this user, so `count === 0` covers "not found" and "not yours" in
+     * one check — same idiom as ChatReactionService.toggle's own deleteMany/count check.
+     */
+    async softDelete(messageId: string, userId: string): Promise<boolean> {
+        const result = await this.prisma.chatMessage.updateMany({
+            where: { id: messageId, userId },
+            data: { deleted: true },
+        });
+        return result.count > 0;
     }
 
     private toChatMessage(row: {
@@ -109,6 +134,7 @@ export class ChatService {
         sentAt: Date;
         attachments: unknown;
         linkPreview: unknown;
+        deleted: boolean;
         reactions?: IChatReactionRow[];
     }): IChatMessage {
         // Folded into groups here rather than by the query: the shape clients render is per-emoji,
@@ -125,6 +151,7 @@ export class ChatService {
             attachments: (row.attachments as IChatAttachment[] | null) ?? undefined,
             linkPreview: (row.linkPreview as ILinkPreview | null) ?? undefined,
             reactions,
+            deleted: row.deleted || undefined,
         };
     }
 }

@@ -106,6 +106,9 @@ model ChatMessage {
   linkPreview Json? // ILinkPreview | null — set asynchronously after the message is already broadcast (link
   // scraping is too slow to sit on the send path), via ChatService.updateLinkPreview + a follow-up
   // 'chat-message-updated' socket event. Absent on the vast majority of rows (most messages have no URL).
+  deleted     Boolean  @default(false) // soft delete — the row stays for history, the sender's own
+  // ChatService.softDelete flips this via 'chat-message-delete', and the frontend renders a
+  // placeholder in place of the real content wherever it's true (live, scrollback, and rejoin alike).
 
   reactions ChatMessageReaction[]
 

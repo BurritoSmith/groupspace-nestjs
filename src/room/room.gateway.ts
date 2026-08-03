@@ -485,6 +485,32 @@ export class RoomGateway implements OnGatewayDisconnect {
     }
 
     /**
+     * Soft-deletes one of the sender's OWN messages, then broadcasts the flag.
+     *
+     * Same persist-first-then-broadcast shape as onChatReaction above, for the same reason: there's
+     * no way to tell every client "this is deleted" and then have the delete itself fail to persist.
+     * Ownership is enforced entirely inside ChatService.softDelete's `updateMany({ where: { id,
+     * userId } })` — userId here comes from socket.data, never from the payload, so a forged
+     * messageId against someone else's row simply matches zero rows and returns { ok: false }.
+     */
+    @SubscribeMessage('chat-message-delete')
+    async onChatMessageDelete(@ConnectedSocket() socket: Socket, @MessageBody() payload: { messageId?: string }): Promise<{ ok: boolean }> {
+        const roomName = socket.data.roomName as string | undefined;
+        const userId = socket.data.userId as string | undefined;
+        const messageId = payload?.messageId;
+        if (!roomName || !userId || typeof messageId !== 'string' || !messageId) {
+            return { ok: false };
+        }
+        const deleted = await this.chatService.softDelete(messageId, userId);
+        if (!deleted) {
+            return { ok: false };
+        }
+        const update: IChatMessageUpdate = { id: messageId, deleted: true };
+        this.server.to(roomName).emit('chat-message-updated', update);
+        return { ok: true };
+    }
+
+    /**
      * Kicks off link-preview scraping for a message that has already been delivered.
      *
      * Deliberately detached rather than awaited: a scrape is a network round trip to a third party
