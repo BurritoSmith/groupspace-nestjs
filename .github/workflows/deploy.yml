@@ -4,10 +4,16 @@ name: Deploy (development)
 # ("Run workflow") or via `gh workflow run deploy.yml`.
 on:
   workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump for this deploy
+        type: choice
+        options: [patch, minor, major, none]
+        default: patch
 
 permissions:
   id-token: write # required to mint the OIDC token Workload Identity Federation exchanges for GCP credentials
-  contents: read
+  contents: write # to push the version commit and its tag, and to create the release
 
 concurrency:
   group: deploy-backend
@@ -29,10 +35,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The default depth-1 checkout has no tags, and the bump derives its changelog section
+          # from the range since the previous one.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # Must happen before "Package the commit" below, which ships `git archive HEAD` — a bump made
+      # after it would never reach the VM. Committed here but pushed only at the very end, once the
+      # deploy has actually succeeded, so a failed run leaves main untouched and no tag can point at
+      # code that did not ship.
+      - name: Bump the version
+        id: version
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          version=$(node scripts/bump-version.mjs "${{ inputs.bump }}" | tail -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${{ inputs.bump }}" != "none" ]; then
+            git add -A
+            git commit -m "Release v$version"
+            git tag -a "v$version" -m "v$version"
+          fi
 
       - run: npm ci
 
@@ -111,3 +138,31 @@ jobs:
           done
           echo "Health check failed"
           exit 1
+
+      # The check the health check cannot make: 200 only proves SOMETHING is answering, and a
+      # container that failed to rebuild keeps answering with the previous version perfectly
+      # happily. Asking it what it is turns "the deploy ran" into "the deploy landed".
+      - name: Verify the deployed version
+        if: inputs.bump != 'none'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          deployed=$(curl -sf "${BACKEND_URL}version" | node -e "process.stdin.on('data', d => console.log(JSON.parse(d).version))")
+          echo "Deployed: $deployed, expected: $VERSION"
+          if [ "$deployed" != "$VERSION" ]; then
+            echo "The running container is not this build"
+            exit 1
+          fi
+
+      # Only on a green deploy — see the bump step's comment.
+      - name: Publish the version
+        if: inputs.bump != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git push --follow-tags origin HEAD:main
+          # The release notes are this version's own CHANGELOG section: everything between its
+          # heading and the next one.
+          awk -v v="## \\[$VERSION\\]" '$0 ~ v {found=1; next} found && /^## \[/ {exit} found' CHANGELOG.md > notes.md
+          gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md
