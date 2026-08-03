@@ -21,7 +21,9 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "//backfill:display": "One-off, run by hand — never part of a deploy. Dry runs by default; pass -- --apply to write. Needs DATABASE_URL and CHAT_MEDIA_GCS_BUCKET. Against production, run it on the VM in a container with --env-file deploy/.env so the database password never leaves the machine.",
+    "backfill:display": "ts-node -P tsconfig.json -r tsconfig-paths/register scripts/backfill-display-renditions.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.21.0",
@@ -57,6 +59,7 @@
     "globals": "^17.0.0",
     "jest": "^30.0.0",
     "prettier": "^3.4.2",
+    "sharp": "^0.35.3",
     "source-map-support": "^0.5.21",
     "supertest": "^7.0.0",
     "ts-jest": "^29.2.5",
