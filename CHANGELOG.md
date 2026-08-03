@@ -11,6 +11,18 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.2] - 2026-08-03
+
+### Added
+
+- Let a user soft-delete their own chat messages ([#45](https://github.com/BurritoSmith/groupspace-nestjs/pull/45))
+
+### Changed
+
+- Version every deploy, and backfill the 56 releases already shipped ([#44](https://github.com/BurritoSmith/groupspace-nestjs/pull/44))
+- Point the PR checklist at this repo's own commands ([#44](https://github.com/BurritoSmith/groupspace-nestjs/pull/44))
+- Match the changelog heading literally when cutting release notes ([#44](https://github.com/BurritoSmith/groupspace-nestjs/pull/44))
+
 ## [0.27.1] - 2026-08-02
 
 ### Changed
@@ -361,7 +373,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.1...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.2...HEAD
+[0.27.2]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.1...v0.27.2
 [0.27.1]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.25.2...v0.26.0
