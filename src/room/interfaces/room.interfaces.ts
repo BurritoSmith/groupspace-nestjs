@@ -11,7 +11,7 @@ export type StreamSource = 'webcam' | 'screen' | 'mic';
 // see isAllowedAttachmentUrl's clamping in room.gateway.ts before any of this reaches other peers.
 export interface IChatAttachment {
     id: string;
-    kind: 'image' | 'video' | 'gif';
+    kind: 'image' | 'video' | 'gif' | 'pdf';
     url: string;
     storagePath: string | null;
     thumbnailUrl: string | null;

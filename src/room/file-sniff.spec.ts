@@ -39,6 +39,10 @@ describe('sniffMediaType', () => {
         expect(sniffMediaType(mp4)).toBe('video/mp4');
     });
 
+    it('recognizes a PDF by its %PDF- header', () => {
+        expect(sniffMediaType(padTo(Buffer.from('%PDF-1.7\n', 'ascii'), 16))).toBe('application/pdf');
+    });
+
     it('rejects an ftyp box with a brand not on the allowlist', () => {
         const mp4 = Buffer.concat([Buffer.alloc(4), Buffer.from('ftyp', 'ascii'), Buffer.from('xxxx', 'ascii'), Buffer.alloc(4)]);
         expect(sniffMediaType(mp4)).toBeNull();

@@ -30,7 +30,9 @@ export class ChatMediaController {
             ? 'video'
             : uploaded.mimeType === 'image/gif'
               ? 'gif'
-              : 'image';
+              : uploaded.mimeType === 'application/pdf'
+                ? 'pdf'
+                : 'image';
 
         const attachment: IChatAttachment = {
             id: randomUUID(),

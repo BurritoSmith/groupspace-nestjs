@@ -64,7 +64,7 @@ export function sanitizeAttachment(attachment: unknown, chatMediaPublicBase: str
         return null;
     }
     const candidate = attachment as Partial<IChatAttachment>;
-    if (candidate.kind !== 'image' && candidate.kind !== 'video' && candidate.kind !== 'gif') {
+    if (candidate.kind !== 'image' && candidate.kind !== 'video' && candidate.kind !== 'gif' && candidate.kind !== 'pdf') {
         return null;
     }
     if (typeof candidate.url !== 'string' || !isAllowedAttachmentUrl(candidate.url, candidate.kind, chatMediaPublicBase)) {
