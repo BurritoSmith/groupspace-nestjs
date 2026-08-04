@@ -36,6 +36,7 @@ describe('RecordingService', () => {
                 sessionName: 'Test Session',
                 startedAt,
                 videoSessions: new Map(),
+                cameraSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
             });
@@ -73,6 +74,7 @@ describe('RecordingService', () => {
                 sessionName: 'Test Session',
                 startedAt: new Date(),
                 videoSessions: new Map(),
+                cameraSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
             };
@@ -447,6 +449,7 @@ describe('RecordingService', () => {
                 roomName: 'mackie',
                 sessionDbId: 'session-1',
                 videoSessions: new Map(),
+                cameraSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
             };
@@ -540,6 +543,7 @@ describe('RecordingService', () => {
                 sessionName: 'Test Session',
                 startedAt: new Date('2026-07-28T12:00:00.000Z'),
                 videoSessions: new Map([['producer-1', {} as IRecordingVideoSession]]),
+                cameraSessions: new Map(),
                 streamNumberCounters: new Map(),
                 pendingFinalizations: new Set(),
             };

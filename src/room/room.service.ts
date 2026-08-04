@@ -233,17 +233,21 @@ export class RoomService implements OnModuleInit {
         kind: mediasoupTypes.MediaKind,
         rtpParameters: mediasoupTypes.RtpParameters,
         source: StreamSource,
+        synthetic?: boolean,
     ): Promise<IProducerSummary> {
         const peer = this.requirePeer(peerId);
         if (!peer.sendTransport) {
             throw new Error(`No send transport for peer ${peerId}`);
         }
-        const producer = await peer.sendTransport.produce({ kind, rtpParameters, appData: { source } });
+        const producer = await peer.sendTransport.produce({ kind, rtpParameters, appData: { source, synthetic } });
         peer.producers.set(producer.id, { producer, source });
         if (source === 'mic') {
             await this.audioLevelObserversByRoom.get(peer.roomName)?.addProducer({ producerId: producer.id });
         }
         // Every producer — webcam, screen, or mic — gets its own independent recording session.
+        // Unaffected by `synthetic` — RecordingService combines any 'webcam'-source producer with the
+        // peer's mic regardless of whether its frames come from a real camera or a canvas (see
+        // MediaRoom.startAvatarVideoProducer on the frontend).
         this.recordingService.notifyProducerCreated(peer.roomName, peer.router, {
             producerId: producer.id,
             peerId: peer.peerId,
@@ -258,6 +262,7 @@ export class RoomService implements OnModuleInit {
             displayName: peer.displayName,
             source,
             kind,
+            synthetic,
         };
     }
 
@@ -282,6 +287,16 @@ export class RoomService implements OnModuleInit {
             // Room.setQualityDemand() on the frontend, which only ever requests 'high'), so this
             // is the only place anything sets 'low' in the first place.
             await consumer.setPreferredLayers({ spatialLayer: 0 });
+            // A producer resume (webcam turning back on, see pauseProducer/resumeProducer above)
+            // does NOT itself trigger a keyframe — without this, this consumer's decoder just waits
+            // for whatever keyframe the producer happens to send next on its own schedule, same
+            // "black tile until we're lucky" gap resumeConsumer()'s own keyframe request exists to
+            // avoid on a fresh consume.
+            consumer.on('producerresume', () => {
+                consumer.requestKeyFrame().catch((error: unknown) => {
+                    this.logger.warn(`requestKeyFrame after producerresume failed for consumer ${consumer.id}: ${error}`);
+                });
+            });
         }
         return {
             id: consumer.id,
@@ -344,6 +359,37 @@ export class RoomService implements OnModuleInit {
         const producer = this.findProducer(consumer.producerId);
         const highestLayer = Math.max(0, (producer?.rtpParameters.encodings?.length ?? 1) - 1);
         await consumer.setPreferredLayers({ spatialLayer: highestLayer });
+    }
+
+    /** Pauses one producer without closing it — used for webcam camera-off, so the SAME producerId/
+     *  SSRC survives the toggle (see MediaRoom.stopWebcam() on the frontend) instead of a full
+     *  close+recreate. The mediasoup worker automatically stops forwarding RTP through every
+     *  Consumer of a paused producer (recording's included) with no action needed here beyond this
+     *  call — see RecordingService, which relies on exactly this. Returns info the gateway needs to
+     *  notify the room (so remote viewers can fall back to an avatar tile instead of a frozen frame). */
+    async pauseProducer(peerId: string, producerId: string): Promise<{ roomName: string } | null> {
+        const peer = this.peers.get(peerId);
+        const record = peer?.producers.get(producerId);
+        if (!peer || !record) {
+            return null;
+        }
+        await record.producer.pause();
+        return { roomName: peer.roomName };
+    }
+
+    /** Resumes a producer paused via pauseProducer() — paired with the frontend's replaceTrack()
+     *  call (a fresh capture on webcam-on) that happens just before this. Requests a keyframe for
+     *  video so remote viewers (and the recording, if attached) get a decodable frame immediately
+     *  instead of waiting on the sender's own next natural keyframe interval — mirrors
+     *  resumeConsumer()'s identical reasoning just below. */
+    async resumeProducer(peerId: string, producerId: string): Promise<{ roomName: string } | null> {
+        const peer = this.peers.get(peerId);
+        const record = peer?.producers.get(producerId);
+        if (!peer || !record) {
+            return null;
+        }
+        await record.producer.resume();
+        return { roomName: peer.roomName };
     }
 
     /** Closes one producer the peer voluntarily stopped (not a disconnect); returns info the gateway needs to notify the room. */

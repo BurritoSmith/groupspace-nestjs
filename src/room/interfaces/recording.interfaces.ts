@@ -16,6 +16,36 @@ export interface IRecordingSnapshot {
     producers: IRecordingProducerInfo[];
 }
 
+/** One participant's combined mic+webcam recording — a single ffmpeg process with two RTP inputs
+ *  (see RecordingService.startCombinedCameraSession), so playback gets one file with the browser's
+ *  own native A/V sync instead of two separately wall-clock-synced files. Only ever created once
+ *  both the mic and webcam producers already exist and are producing real data — see the class doc
+ *  comment on RecordingService and its "Validation spike" note for why a speculative, not-yet-live
+ *  video input doesn't work (WebM needs real frame dimensions at header-write time).
+ *
+ *  videoConsumer/videoProducerId are nullable: the video half can detach (producer closes for real
+ *  — a rare edge case now that camera-off pauses rather than closes, see MediaRoom.stopWebcam())
+ *  without ending the session — the mic keeps recording solo into the same file until a fresh
+ *  webcam producer, if any, attaches back into the still-open videoTransport. */
+export interface ICombinedCameraSession {
+    peerId: string;
+    userId: string;
+    displayName: string;
+    dbId: string;
+    audioProducerId: string;
+    videoProducerId: string | null;
+    audioTransport: mediasoupTypes.PlainTransport;
+    audioConsumer: mediasoupTypes.Consumer;
+    videoTransport: mediasoupTypes.PlainTransport;
+    videoConsumer: mediasoupTypes.Consumer | null;
+    audioSdpPath: string;
+    videoSdpPath: string;
+    destPortAudio: number;
+    destPortVideo: number;
+    outputPath: string;
+    ffmpeg: ChildProcess;
+}
+
 export interface IRecordingVideoSession {
     producerId: string;
     peerId: string;
@@ -115,6 +145,9 @@ export interface IRoomRecordingState {
     // each with a fully independent lifecycle keyed by producerId (no shared/coupled state
     // between them, unlike the old single shared audio-mix session).
     videoSessions: Map<string, IRecordingVideoSession>; // keyed by producerId
+    // Combined mic+webcam recordings — keyed by peerId (not producerId, unlike videoSessions above)
+    // since one entry groups two producerIds together. See ICombinedCameraSession.
+    cameraSessions: Map<string, ICombinedCameraSession>;
     // Per-(identity, streamType) sequence counter for the trailing filename token — keyed e.g.
     // "<peerId>:webcam", "<peerId>:screen", "<peerId>:mic". Disambiguates a single participant's
     // multiple simultaneous screen-shares (or successive mic on/off cycles) within one recording

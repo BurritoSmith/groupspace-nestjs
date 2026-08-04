@@ -160,8 +160,11 @@ model Recording {
   userId       String? // nullable — the combined-audio-mix row has no single owning participant
   user         User?            @relation(fields: [userId], references: [id])
   displayName  String // snapshot; literal 'mixed-audio' for the audio-mix row
-  streamType   String // 'webcam' | 'screen' | 'audio' — plain String, not a Prisma enum: RecordingService
+  streamType   String // 'webcam' | 'screen' | 'mic' | 'camera' — plain String, not a Prisma enum: RecordingService
   // already treats these as plain string literals, an enum would add migration overhead for no benefit here.
+  // 'camera' is a single file combining one participant's mic AND webcam (see
+  // RecordingService.startCombinedCameraSession) — used instead of separate 'mic'/'webcam' rows
+  // whenever both are already active together, for frame-accurate native A/V sync at playback.
   streamNumber Int
   filename     String
   gcsPath      String? // <roomName>/<sessionName>/<filename> in RECORDINGS_GCS_BUCKET, when configured
@@ -172,7 +175,7 @@ model Recording {
   // hands off to the signed GCS URL. Stays null forever in local dev (no bucket configured).
   thumbnailStatus    String? // 'live' | 'final' — plain String, matching streamType's own convention over a
   // Prisma enum for a small state machine. Null = no thumbnail yet (mid-recording, before the first extraction
-  // attempt, or extraction failed), or permanently null for streamType 'audio' (no thumbnail concept).
+  // attempt, or extraction failed), or permanently null for streamType 'mic' (no thumbnail concept).
   thumbnailUpdatedAt DateTime? // set every time the thumbnail file is (re)written. Doubles as the cache-busting
   // query param on the thumbnail URL (the derived filename is identical across the grayscale->color swap).
   startedAt    DateTime         @default(now())

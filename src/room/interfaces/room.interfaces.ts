@@ -129,6 +129,13 @@ export interface IProducerSummary {
     displayName: string;
     source: StreamSource;
     kind: mediasoupTypes.MediaKind;
+    /** True for a client-synthesized "avatar video" producer (a canvas-drawn still image, published
+     *  as a 'webcam'-source producer purely so RecordingService combines it with the peer's mic into
+     *  one recorded file — see MediaRoom.startAvatarVideoProducer on the frontend). This server has
+     *  no opinion on the flag at all beyond relaying it: every OTHER client's 'new-producer' handler
+     *  is what actually uses it, to skip live-consuming/rendering it — the feature is deliberately
+     *  recording-only, never shown to live viewers. */
+    synthetic?: boolean;
 }
 
 export interface IJoinRoomPayload {
@@ -202,6 +209,8 @@ export interface IProducePayload {
     kind: mediasoupTypes.MediaKind;
     rtpParameters: mediasoupTypes.RtpParameters;
     source: StreamSource;
+    /** See IProducerSummary.synthetic — passed straight through, this server has no opinion on it. */
+    synthetic?: boolean;
 }
 
 export interface IConsumePayload {
@@ -235,6 +244,14 @@ export interface ISetConsumerQualityPayload {
 }
 
 export interface ICloseProducerPayload {
+    producerId: string;
+}
+
+export interface IPauseProducerPayload {
+    producerId: string;
+}
+
+export interface IResumeProducerPayload {
     producerId: string;
 }
 
