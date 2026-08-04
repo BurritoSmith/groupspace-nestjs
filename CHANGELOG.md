@@ -11,6 +11,13 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.7] - 2026-08-04
+
+### Added
+
+- Combine mic+webcam into one recording, fix broken playback URLs, add avatar-video for camera-off recording ([#50](https://github.com/BurritoSmith/groupspace-nestjs/pull/50))
+- Add docs/plans entries for the combined-recording and avatar-video work ([#50](https://github.com/BurritoSmith/groupspace-nestjs/pull/50))
+
 ## [0.27.6] - 2026-08-04
 
 ### Added
@@ -398,7 +405,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.6...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.7...HEAD
+[0.27.7]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.6...v0.27.7
 [0.27.6]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.5...v0.27.6
 [0.27.5]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.4...v0.27.5
 [0.27.4]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.3...v0.27.4
