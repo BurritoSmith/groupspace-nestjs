@@ -4,7 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { sniffedTypeMatchesDeclared, sniffMediaType } from './file-sniff';
+import { IChatAttachment } from './interfaces/room.interfaces';
 import { PdfThumbnailService } from './pdf-thumbnail.service';
+import { VideoThumbnailService } from './video-thumbnail.service';
 
 export interface IUploadedChatMedia {
     url: string;
@@ -17,6 +19,11 @@ const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp
 const DEFAULT_MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 const DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 const DEFAULT_MAX_PDF_BYTES = 50 * 1024 * 1024;
+
+/** How far an existing poster's own aspect ratio may drift from the claimed width/height before
+ *  it's treated as wrong rather than encoder rounding noise — see ensureVideoThumbnail. Tune once
+ *  there's real data (see the video-poster-fallback plan's verification notes). */
+const ASPECT_RATIO_TOLERANCE = 0.12;
 
 const EXTENSION_BY_MIME_TYPE: Record<string, string> = {
     'image/jpeg': 'jpg',
@@ -72,7 +79,10 @@ export class ChatMediaService {
         Number(process.env.CHAT_MEDIA_MAX_PDF_BYTES) || DEFAULT_MAX_PDF_BYTES,
     );
 
-    constructor(private readonly pdfThumbnails: PdfThumbnailService) {}
+    constructor(
+        private readonly pdfThumbnails: PdfThumbnailService,
+        private readonly videoThumbnails: VideoThumbnailService,
+    ) {}
 
     /** Validates (magic-byte sniff, not the client's claimed Content-Type/filename), then uploads
      *  a chat attachment. Throws PayloadTooLargeException/UnsupportedMediaTypeException — the
@@ -127,6 +137,91 @@ export class ChatMediaService {
             this.logger.warn(`Failed to upload generated pdf thumbnail: ${error instanceof Error ? error.message : String(error)}`);
             return null;
         }
+    }
+
+    /**
+     * Regenerates a video's poster/dimensions when they look missing or wrong (see
+     * videoThumbnailNeedsRegeneration). Returns a NEW IChatAttachment with thumbnailUrl/width/height
+     * patched, or null when nothing needed to change or generation failed — both mean: leave the
+     * message exactly as sent. Mirrors generatePdfThumbnail's best-effort shape, but takes/returns
+     * a whole attachment (rather than a bare url/width/height) since the caller needs the patched
+     * fields merged back onto the one it's replacing in the message's attachments array.
+     */
+    async ensureVideoThumbnail(attachment: IChatAttachment, roomName: string): Promise<IChatAttachment | null> {
+        if (attachment.kind !== 'video' || !(await this.videoThumbnailNeedsRegeneration(attachment))) {
+            return null;
+        }
+        const generated = await this.videoThumbnails.generate(this.resolveMediaLocation(attachment.url));
+        if (!generated) {
+            return null;
+        }
+        try {
+            const uploaded = await this.uploadAttachment(generated.buffer, roomName, 'image/jpeg');
+            return { ...attachment, thumbnailUrl: uploaded.url, width: generated.width, height: generated.height };
+        } catch (error) {
+            this.logger.warn(`Failed to upload generated video thumbnail: ${error instanceof Error ? error.message : String(error)}`);
+            return null;
+        }
+    }
+
+    /**
+     * True when a video attachment's poster is missing, or when the poster's OWN decoded pixel
+     * aspect ratio disagrees with the claimed width/height by more than ASPECT_RATIO_TOLERANCE (or
+     * the poster can't be read/decoded at all).
+     *
+     * Deliberately only ever reads the poster image's own bytes here (cheap — a small JPEG), never
+     * the video itself — probing the source video's real dimensions on every message, including the
+     * common already-correct case, would touch every video's (up to 100MB) bytes for a failure mode
+     * (internally-consistent-but-wrong values) this check doesn't need to catch.
+     */
+    private async videoThumbnailNeedsRegeneration(attachment: IChatAttachment): Promise<boolean> {
+        if (!attachment.thumbnailUrl || !attachment.width || !attachment.height) {
+            return true;
+        }
+        const posterBytes = await this.readMediaBytes(attachment.thumbnailUrl);
+        if (!posterBytes) {
+            return true;
+        }
+        const posterDimensions = await this.videoThumbnails.readImageDimensions(posterBytes);
+        if (!posterDimensions) {
+            return true;
+        }
+        const claimedRatio = attachment.width / attachment.height;
+        const posterRatio = posterDimensions.width / posterDimensions.height;
+        return Math.abs(claimedRatio - posterRatio) / claimedRatio > ASPECT_RATIO_TOLERANCE;
+    }
+
+    /** Best-effort raw-bytes read of one of OUR OWN attachment URLs (never the video itself — only
+     *  used for the small poster-image mismatch check above). Plain fetch()/fs.readFile — NOT
+     *  link-preview-url.ts's SSRF-hardened fetchWithRedirectGuard, which exists for arbitrary
+     *  THIRD-PARTY urls; this only ever reads our own already-validated storage. Null on any failure
+     *  (404, corrupt, unreachable). */
+    private async readMediaBytes(url: string): Promise<Buffer | null> {
+        try {
+            const location = this.resolveMediaLocation(url);
+            if (/^https?:\/\//.test(location)) {
+                const response = await fetch(location);
+                if (!response.ok) {
+                    return null;
+                }
+                return Buffer.from(await response.arrayBuffer());
+            }
+            return await fs.readFile(location);
+        } catch {
+            return null;
+        }
+    }
+
+    /** Resolves an attachment's own url to something ffmpeg/fs can read: the https URL as-is in
+     *  GCS mode (public-read — no auth needed), or a real local filesystem path (strip publicBase's
+     *  /chat-media/ prefix, join onto localDir) in local-dev mode, where storagePath is never
+     *  populated (see uploadAttachment). */
+    private resolveMediaLocation(url: string): string {
+        if (this.gcsBucketName) {
+            return url;
+        }
+        const relative = url.startsWith(this.publicBase) ? url.slice(this.publicBase.length) : url.replace(/^\/+/, '');
+        return path.join(this.localDir, relative);
     }
 
     private sanitize(value: string): string {

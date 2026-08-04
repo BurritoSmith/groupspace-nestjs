@@ -9,8 +9,9 @@ export interface PdfThumbnailResult {
 }
 
 /** Matches the image pipeline's own thumbnail target (see the frontend's image-thumbnail.ts) — one
- *  size serves the same consumers regardless of which kind generated it. */
-const THUMBNAIL_MAX_EDGE_PX = 768;
+ *  size serves the same consumers regardless of which kind generated it. Exported for
+ *  VideoThumbnailService, which targets the same box for the identical reason. */
+export const THUMBNAIL_MAX_EDGE_PX = 768;
 /** Matches the frontend's own THUMBNAIL_QUALITY — text renders with visible JPEG artefacts well
  *  before a photo does. */
 const THUMBNAIL_QUALITY = 0.8;

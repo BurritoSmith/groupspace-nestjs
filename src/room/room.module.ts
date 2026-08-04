@@ -20,6 +20,7 @@ import { TurnCredentialsService } from './turn-credentials.service';
 import { UsersService } from './users.service';
 import { UserSettingsController } from './user-settings.controller';
 import { UserSettingsService } from './user-settings.service';
+import { VideoThumbnailService } from './video-thumbnail.service';
 
 @Module({
     imports: [
@@ -53,6 +54,7 @@ import { UserSettingsService } from './user-settings.service';
         SessionService,
         ChatMediaService,
         PdfThumbnailService,
+        VideoThumbnailService,
         LinkPreviewService,
         GiphyService,
         SessionAuthGuard,
