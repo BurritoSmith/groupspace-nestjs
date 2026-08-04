@@ -11,6 +11,12 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.5] - 2026-08-04
+
+### Added
+
+- Render PDF chat-attachment thumbnails server-side ([#48](https://github.com/BurritoSmith/groupspace-nestjs/pull/48))
+
 ## [0.27.4] - 2026-08-04
 
 ### Added
@@ -385,7 +391,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.4...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.5...HEAD
+[0.27.5]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.4...v0.27.5
 [0.27.4]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.3...v0.27.4
 [0.27.3]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.2...v0.27.3
 [0.27.2]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.1...v0.27.2
