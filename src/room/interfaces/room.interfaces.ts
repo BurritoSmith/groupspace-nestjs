@@ -138,6 +138,10 @@ export interface IJoinRoomPayload {
     // subsequent join — see SessionService and room.gateway.ts's onJoinRoom.
     googleIdToken?: string;
     sessionToken?: string;
+    // Whichever invitation code the frontend's gate was satisfied with (InvitationGate,
+    // spaces-angular-claude) — only meaningful alongside googleIdToken, and only actually used
+    // when that turns out to be a brand new User row; see UsersService.upsertFromGoogleProfile.
+    invitationCode?: string;
 }
 
 export interface IJoinRoomResult {

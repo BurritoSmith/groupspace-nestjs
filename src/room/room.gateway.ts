@@ -205,7 +205,7 @@ export class RoomGateway implements OnGatewayDisconnect {
             if (!profile) {
                 throw new WsException('Google sign-in could not be verified.');
             }
-            const user = await this.usersService.upsertFromGoogleProfile(profile);
+            const user = await this.usersService.upsertFromGoogleProfile(profile, payload.invitationCode);
             userId = user.id;
             displayName = profile.displayName;
             pictureUrl = profile.pictureUrl;
