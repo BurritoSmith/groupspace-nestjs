@@ -10,6 +10,7 @@ import { GoogleAuthService } from './google-auth.service';
 import { InvitationsController } from './invitations.controller';
 import { InvitationsService } from './invitations.service';
 import { LinkPreviewService } from './link-preview.service';
+import { PdfThumbnailService } from './pdf-thumbnail.service';
 import { RecordingService } from './recording.service';
 import { RoomGateway } from './room.gateway';
 import { RoomService } from './room.service';
@@ -51,6 +52,7 @@ import { UserSettingsService } from './user-settings.service';
         ChatReactionService,
         SessionService,
         ChatMediaService,
+        PdfThumbnailService,
         LinkPreviewService,
         GiphyService,
         SessionAuthGuard,

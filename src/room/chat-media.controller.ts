@@ -34,15 +34,24 @@ export class ChatMediaController {
                 ? 'pdf'
                 : 'image';
 
+        // Unlike image/video, a pdf's thumbnail is generated HERE, not by the client — client-side
+        // rendering (pdfjs-dist in the browser, mirroring how a video's poster frame is generated
+        // on-device) turned out not to work reliably in practice, so ChatMediaService renders it
+        // server-side instead. It's also the only source of a pdf's width/height, since there is no
+        // client-side render to have measured them from.
+        const pdfThumbnail = kind === 'pdf' ? await this.chatMediaService.generatePdfThumbnail(file.buffer, roomName ?? '') : null;
+
         const attachment: IChatAttachment = {
             id: randomUUID(),
             kind,
             url: uploaded.url,
             storagePath: uploaded.storagePath,
-            thumbnailUrl: null, // client fills this in separately with a client-generated poster frame, when it has one
+            // client fills this in separately with a client-generated poster frame, when it has one
+            // — except a pdf, whose thumbnail (if generation succeeded) is already uploaded above.
+            thumbnailUrl: pdfThumbnail?.url ?? null,
             mimeType: uploaded.mimeType,
-            width: parseOptionalPositiveInt(width),
-            height: parseOptionalPositiveInt(height),
+            width: pdfThumbnail?.width ?? parseOptionalPositiveInt(width),
+            height: pdfThumbnail?.height ?? parseOptionalPositiveInt(height),
             durationMs: parseOptionalPositiveInt(durationMs),
             sizeBytes: file.buffer.length,
             name: file.originalname ? file.originalname.slice(0, 255) : null,
