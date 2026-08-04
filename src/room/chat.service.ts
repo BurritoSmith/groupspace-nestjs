@@ -67,6 +67,23 @@ export class ChatService {
         }
     }
 
+    /**
+     * Replaces an already-persisted message's whole attachments array — used to patch in a
+     * server-regenerated video poster (see RoomGateway.ensureVideoPosters). Mirrors
+     * updateLinkPreview exactly: same fire-and-forget-tolerant shape (the row may not exist yet,
+     * since saveMessage is itself fire-and-forget), same try/catch/log-warning on failure.
+     */
+    async updateAttachments(id: string, attachments: IChatAttachment[]): Promise<void> {
+        try {
+            await this.prisma.chatMessage.update({
+                where: { id },
+                data: { attachments: attachments as unknown as Prisma.InputJsonValue },
+            });
+        } catch (error: unknown) {
+            this.logger.warn(`Failed to persist updated attachments for chat message ${id}: ${error}`);
+        }
+    }
+
     /** Awaited — a read for the join-room ack, not a write; no "don't block" concern applies. Most recent page, oldest-first. */
     async getRecentHistory(roomName: string, limit = HISTORY_PAGE_SIZE): Promise<IChatMessage[]> {
         return this.queryPage({ roomName }, limit);

@@ -26,6 +26,7 @@ import { TurnCredentialsService } from './turn-credentials.service';
 import { UsersService } from './users.service';
 import { UserSettingsService } from './user-settings.service';
 import type {
+    IChatAttachment,
     IChatMessage,
     IChatMessagePayload,
     IChatMessageUpdate,
@@ -436,6 +437,7 @@ export class RoomGateway implements OnGatewayDisconnect {
             attachments,
         );
         this.scrapeLinkPreview(message.id, roomName, text);
+        this.ensureVideoPosters(message.id, roomName, attachments);
     }
 
     /**
@@ -537,6 +539,38 @@ export class RoomGateway implements OnGatewayDisconnect {
                 this.server.to(roomName).emit('chat-message-updated', update);
             })
             .catch((error: unknown) => this.logger.debug(`Link preview scrape failed for message ${messageId}: ${error}`));
+    }
+
+    /**
+     * Kicks off server-side video-poster regeneration for a message that has already been
+     * delivered — the video-attachment equivalent of scrapeLinkPreview immediately above, wired
+     * the same way: detached rather than awaited (a poster fix is a fetch/ffmpeg round trip, no
+     * chat message should wait on it), patching the message afterward via 'chat-message-updated'
+     * only if something actually needed fixing.
+     *
+     * Each video attachment's check/regenerate runs independently and in parallel — one slow or
+     * failing video must never hold up another's fix, and there's no ordering dependency between
+     * them. The persisted/broadcast update always carries the WHOLE attachments array (unchanged
+     * attachments included), matching how ChatService.updateAttachments and
+     * IChatMessageUpdate.attachments replace the column/list wholesale rather than patching by id.
+     */
+    private ensureVideoPosters(messageId: string, roomName: string, attachments: IChatAttachment[]): void {
+        const videoAttachments = attachments.filter((attachment) => attachment.kind === 'video');
+        if (videoAttachments.length === 0) {
+            return;
+        }
+        void Promise.all(videoAttachments.map((attachment) => this.chatMediaService.ensureVideoThumbnail(attachment, roomName)))
+            .then(async (patches) => {
+                const patchById = new Map(patches.filter((patch): patch is IChatAttachment => patch !== null).map((patch) => [patch.id, patch]));
+                if (patchById.size === 0) {
+                    return; // nothing needed fixing — leave the message exactly as sent
+                }
+                const updatedAttachments = attachments.map((attachment) => patchById.get(attachment.id) ?? attachment);
+                await this.chatService.updateAttachments(messageId, updatedAttachments);
+                const update: IChatMessageUpdate = { id: messageId, attachments: updatedAttachments };
+                this.server.to(roomName).emit('chat-message-updated', update);
+            })
+            .catch((error: unknown) => this.logger.debug(`Video poster regeneration failed for message ${messageId}: ${error}`));
     }
 
     /** Purely ephemeral — no persistence, no ack. socket.to() (not this.server.to()) so the

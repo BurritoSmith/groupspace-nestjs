@@ -6,6 +6,7 @@ function createFakePrisma() {
             create: jest.fn().mockResolvedValue({}),
             findMany: jest.fn().mockResolvedValue([]),
             updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+            update: jest.fn().mockResolvedValue({}),
         },
     };
 }
@@ -227,6 +228,32 @@ describe('ChatService', () => {
 
             const call = fakePrisma.chatMessage.findMany.mock.calls[0][0];
             expect(call.where.sentAt.lte).toBeInstanceOf(Date);
+        });
+    });
+
+    describe('updateAttachments', () => {
+        it('replaces the row\'s attachments column with the given array', async () => {
+            const fakePrisma = createFakePrisma();
+            const service = new ChatService(fakePrisma as never);
+            const attachments = [{ id: 'att-1', kind: 'video' as const, thumbnailUrl: 'https://x/poster.jpg' }];
+
+            await service.updateAttachments('msg-1', attachments as never);
+
+            expect(fakePrisma.chatMessage.update).toHaveBeenCalledWith({
+                where: { id: 'msg-1' },
+                data: { attachments },
+            });
+        });
+
+        // Tolerates the row not existing, same as updateLinkPreview — saveMessage is itself
+        // fire-and-forget, so a poster regeneration can genuinely finish before the insert it
+        // belongs to. Neither ordering is worth blocking on or surfacing as an error.
+        it('resolves without throwing when the underlying update fails (row not found yet)', async () => {
+            const fakePrisma = createFakePrisma();
+            fakePrisma.chatMessage.update.mockRejectedValue(new Error('Record to update not found'));
+            const service = new ChatService(fakePrisma as never);
+
+            await expect(service.updateAttachments('msg-1', [])).resolves.toBeUndefined();
         });
     });
 

@@ -1,3 +1,4 @@
+import { IChatAttachment } from './interfaces/room.interfaces';
 import { RoomGateway } from './room.gateway';
 
 describe('RoomGateway', () => {
@@ -5,18 +6,28 @@ describe('RoomGateway', () => {
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
     let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock; closePeer: jest.Mock };
-    let fakeChatService: { saveMessage: jest.Mock; updateLinkPreview: jest.Mock; softDelete: jest.Mock };
+    let fakeChatService: { saveMessage: jest.Mock; updateLinkPreview: jest.Mock; softDelete: jest.Mock; updateAttachments: jest.Mock };
     let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
-    let fakeChatMediaService: { publicBase: string };
+    let fakeChatMediaService: { publicBase: string; ensureVideoThumbnail: jest.Mock };
     let fakeLinkPreviewService: { fetchPreview: jest.Mock };
     let fakeChatReactionService: { toggle: jest.Mock; listGrouped: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
         fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn(), closePeer: jest.fn() };
-        fakeChatService = { saveMessage: jest.fn(), updateLinkPreview: jest.fn().mockResolvedValue(undefined), softDelete: jest.fn().mockResolvedValue(true) };
+        fakeChatService = {
+            saveMessage: jest.fn(),
+            updateLinkPreview: jest.fn().mockResolvedValue(undefined),
+            softDelete: jest.fn().mockResolvedValue(true),
+            updateAttachments: jest.fn().mockResolvedValue(undefined),
+        };
         fakeUserSettingsService = { save: jest.fn().mockResolvedValue(undefined), getAll: jest.fn().mockResolvedValue([]) };
-        fakeChatMediaService = { publicBase: 'https://storage.googleapis.com/test-chat-media-bucket/' };
+        // Defaults to "nothing needed fixing" so every existing attachment test is unaffected by
+        // the video-poster regeneration that now fires alongside them.
+        fakeChatMediaService = {
+            publicBase: 'https://storage.googleapis.com/test-chat-media-bucket/',
+            ensureVideoThumbnail: jest.fn().mockResolvedValue(null),
+        };
         // Defaults to "no preview" so every existing message test is unaffected by the scrape that
         // now fires alongside them.
         fakeLinkPreviewService = { fetchPreview: jest.fn().mockResolvedValue(null) };
@@ -44,6 +55,31 @@ describe('RoomGateway', () => {
 
     function fakeSocket(data: Record<string, unknown>) {
         return { id: 'peer-1', data, to: toSpy, join: jest.fn().mockResolvedValue(undefined), leave: jest.fn().mockResolvedValue(undefined) } as never;
+    }
+
+    /** onChatMessage kicks off ensureVideoPosters (like scrapeLinkPreview) detached rather than
+     *  awaited — a setImmediate flush drains every microtask queued before it (the Promise.all,
+     *  the .then, the awaited updateAttachments call), the same way real message delivery doesn't
+     *  wait on any of it either. */
+    function flushPromises(): Promise<void> {
+        return new Promise((resolve) => setImmediate(resolve));
+    }
+
+    function videoAttachment(overrides: Partial<IChatAttachment> = {}): IChatAttachment {
+        return {
+            id: 'att-1',
+            kind: 'video',
+            url: 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/08/video.mp4',
+            storagePath: 'lobby/2026/08/video.mp4',
+            thumbnailUrl: null,
+            mimeType: 'video/mp4',
+            width: null,
+            height: null,
+            durationMs: 5000,
+            sizeBytes: 5_000_000,
+            name: 'video.mp4',
+            ...overrides,
+        };
     }
 
     describe('onUserTyping', () => {
@@ -292,6 +328,78 @@ describe('RoomGateway', () => {
             // and the album falls back to compositing three images per render for everyone but the
             // sender, whose optimistic copy still has it.
             expect(broadcast.attachments[0].albumCoverUrl).toBe('https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/08/cover.jpg');
+        });
+    });
+
+    describe('onChatMessage — video poster regeneration', () => {
+        it('patches and re-broadcasts the message when a video attachment needed a new poster', async () => {
+            const patchedAttachment = { ...videoAttachment(), thumbnailUrl: 'https://storage.googleapis.com/test-chat-media-bucket/lobby/poster.jpg', width: 1920, height: 1080 };
+            fakeChatMediaService.ensureVideoThumbnail.mockResolvedValue(patchedAttachment);
+
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: '',
+                attachments: [videoAttachment()],
+            });
+            await flushPromises();
+
+            expect(fakeChatMediaService.ensureVideoThumbnail).toHaveBeenCalledWith(expect.objectContaining({ id: 'att-1' }), 'lobby');
+            expect(fakeChatService.updateAttachments).toHaveBeenCalledWith(expect.any(String), [patchedAttachment]);
+            const updateCall = emitSpy.mock.calls.find(
+                (call) => call[0] === 'chat-message-updated' && Array.isArray((call[1] as { attachments?: unknown }).attachments),
+            );
+            expect(updateCall?.[1]).toEqual({ id: expect.any(String), attachments: [patchedAttachment] });
+        });
+
+        it('does nothing further when the poster check finds nothing to fix', async () => {
+            fakeChatMediaService.ensureVideoThumbnail.mockResolvedValue(null);
+
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: '',
+                attachments: [videoAttachment()],
+            });
+            await flushPromises();
+
+            expect(fakeChatMediaService.ensureVideoThumbnail).toHaveBeenCalled();
+            expect(fakeChatService.updateAttachments).not.toHaveBeenCalled();
+            expect(emitSpy.mock.calls.filter((call) => call[0] === 'chat-message-updated')).toHaveLength(0);
+        });
+
+        it('never calls ensureVideoThumbnail for a message with no video attachments', async () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: '',
+                attachments: [
+                    {
+                        id: 'att-1',
+                        kind: 'image',
+                        url: 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo.jpg',
+                        storagePath: 'lobby/2026/07/photo.jpg',
+                        thumbnailUrl: null,
+                        mimeType: 'image/jpeg',
+                        width: 800,
+                        height: 600,
+                        durationMs: null,
+                        sizeBytes: 12345,
+                        name: 'photo.jpg',
+                    },
+                ],
+            });
+            await flushPromises();
+
+            expect(fakeChatMediaService.ensureVideoThumbnail).not.toHaveBeenCalled();
+        });
+
+        it('does not let a rejected poster check stop the message from having already been delivered', async () => {
+            fakeChatMediaService.ensureVideoThumbnail.mockRejectedValue(new Error('ffmpeg not found'));
+
+            expect(() =>
+                gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                    text: '',
+                    attachments: [videoAttachment()],
+                }),
+            ).not.toThrow();
+            await flushPromises();
+
+            expect(fakeChatService.updateAttachments).not.toHaveBeenCalled();
         });
     });
 
