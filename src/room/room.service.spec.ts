@@ -83,7 +83,9 @@ describe('RoomService', () => {
 
         it('defaults a freshly-created video consumer to the lowest simulcast layer', async () => {
             const setPreferredLayers = jest.fn().mockResolvedValue(undefined);
-            const consumeMock = jest.fn().mockResolvedValue({ id: 'consumer-1', kind: 'video', rtpParameters: {}, setPreferredLayers });
+            // `on` stub — RoomService.consume() registers a 'producerresume' keyframe-request
+            // listener on every video consumer (see its own comment on why).
+            const consumeMock = jest.fn().mockResolvedValue({ id: 'consumer-1', kind: 'video', rtpParameters: {}, setPreferredLayers, on: jest.fn() });
             seedConsumingPeer(consumeMock);
 
             await service.consume('viewer-1', 'producer-1', {} as never);

@@ -8,7 +8,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { types as mediasoupTypes } from 'mediasoup';
 import { PrismaService } from '../prisma/prisma.service';
+import { StreamSource } from './interfaces/room.interfaces';
 import {
+    ICombinedCameraSession,
     IRecordingProducerInfo,
     IRecordingSessionDetail,
     IRecordingSessionSummary,
@@ -37,12 +39,41 @@ interface IPlaybackUrlSourceRow {
  * (video) + Opus (audio), which is WebM's own native codec pair, so there's
  * nothing to re-encode; this is a direct passthrough of whatever the sending
  * browser's own encoder already produced.
- * Every producer — webcam, screen, AND mic — gets its own fully independent
- * recording session (one PlainTransport, one ffmpeg process, one Recording
- * row), synced together afterward on the shared playback timeline via each
- * row's own startedAt/stoppedAt. Mic audio is no longer mixed into one
- * combined track; each participant's mic is recorded and attributed to them
- * individually.
+ *
+ * Screen share still gets its own fully independent recording session per
+ * producer (one PlainTransport, one ffmpeg process, one Recording row), synced
+ * afterward on the shared playback timeline via its own startedAt/stoppedAt —
+ * unaffected by the rest of this comment.
+ *
+ * A participant's MIC and WEBCAM, when both are already active together, are
+ * instead recorded as ONE combined session (see startCombinedCameraSession) —
+ * a single ffmpeg process with two RTP inputs muxed into one file, so playback
+ * gets the browser's own native, frame-accurate A/V sync instead of two
+ * separately wall-clock-synced files (the previous design here — kept for
+ * screen share, and for a mic/webcam pair that never end up combined — was
+ * deliberately NOT combining them, on the reasoning that only lining up
+ * `startedAt` more precisely would fix every stream type uniformly, including
+ * screen share, which muxing alone never could. That fix (capturing
+ * `startedAt` right when RTP starts, not after keyframe verification — still
+ * true today, see startVideoSession) closed most of the gap but wasn't tight
+ * enough for lip sync specifically, which is what motivated actually combining
+ * mic+webcam here).
+ *
+ * Combining only ever happens when BOTH producers are already known and
+ * producing real data at the moment the combined ffmpeg process launches —
+ * never speculatively. A validation spike confirmed a video RTP input that's
+ * declared upfront but silent for a while doesn't just delay, it fails outright
+ * (WebM needs a video track's real pixel dimensions at header-write time,
+ * which nothing but a decoded frame can supply). So a webcam enabled well
+ * after mic already started recording solo falls back to today's independent
+ * `'webcam'` file + wall-clock sync, unchanged — see notifyProducerCreated.
+ *
+ * A participant's mic and webcam Producers, once combined, stay alive across
+ * camera on/off toggles (see MediaRoom.stopWebcam()/resumeWebcamProducer() on
+ * the frontend, which pause/resume rather than close/recreate) — the mediasoup
+ * worker automatically stops/resumes forwarding RTP through this file's
+ * Consumers with no action needed here, so one combined recording spans the
+ * whole camera-toggle history of a session with no re-syncing ever required.
  */
 @Injectable()
 export class RecordingService {
@@ -197,19 +228,22 @@ export class RecordingService {
         }
     }
 
-    /** SSLIP_HOSTNAME is the public HTTPS domain Caddy already TLS-terminates for and reverse-proxies
-     *  straight through to this app (its catch-all `reverse_proxy 127.0.0.1:3001` has no path matcher,
-     *  so /recordings/* is already publicly reachable with zero deploy changes) — set in production,
-     *  unset in local dev where localhost is correct instead. */
-    private publicBaseUrl(): string {
-        return process.env.SSLIP_HOSTNAME ? `https://${process.env.SSLIP_HOSTNAME}` : `http://localhost:${process.env.PORT ?? 3001}`;
-    }
-
     /** Points at the static route main.ts mounts over recordingsDir. Used as the immediately-available
      *  link the instant a recording finishes locally, before (or instead of, if it never lands) the
-     *  separate GCS upload step completes — see buildPlaybackUrls. */
+     *  separate GCS upload step completes — see buildPlaybackUrls.
+     *
+     *  Root-relative, not an absolute origin — mirrors ChatMediaService.publicBase's identical
+     *  `/chat-media/` convention for the same reason: this server has no reliable way to know what
+     *  hostname/protocol a given client actually reached it on (previously hardcoded
+     *  `http://localhost:${PORT}`, which broke for every client except one on the exact same
+     *  machine, and broke outright once local dev started terminating TLS — see DEV_HTTPS_CERT —
+     *  since that guess was always plain http). The frontend resolves this against whatever origin
+     *  it's already talking to the API on (see resolveMediaUrl()), which is correct in every case:
+     *  local dev on any hostname/LAN-IP/port, the Electron app (a different origin than the API,
+     *  which is exactly why this can't just be resolved against window.location instead), and
+     *  production, where Caddy reverse-proxies /recordings/* on the very same origin anyway. */
     private buildLocalFileUrl(filename: string): string {
-        return `${this.publicBaseUrl()}/recordings/${encodeURIComponent(filename)}`;
+        return `/recordings/${encodeURIComponent(filename)}`;
     }
 
     /** Same derive-by-string-replace convention as tempRecordingPath — no DB column needed for the path itself. */
@@ -219,13 +253,14 @@ export class RecordingService {
 
     /** thumbnailUpdatedAt doubles as a cache-busting query param — the derived thumbnail filename is
      *  identical across the grayscale ('live') -> color ('final') regeneration, so without this the
-     *  browser would keep serving whichever version it first cached at that URL. */
+     *  browser would keep serving whichever version it first cached at that URL. Root-relative for
+     *  the same reason as buildLocalFileUrl above. */
     private buildLocalThumbnailUrl(filename: string, updatedAt: Date | null): string | null {
         if (!updatedAt) {
             return null;
         }
         const thumbFilename = this.thumbnailPath(filename);
-        return `${this.publicBaseUrl()}/recordings/${encodeURIComponent(thumbFilename)}?v=${updatedAt.getTime()}`;
+        return `/recordings/${encodeURIComponent(thumbFilename)}?v=${updatedAt.getTime()}`;
     }
 
     /** Single source of truth for "what URL should this recording show right now" — reused by the
@@ -271,6 +306,7 @@ export class RecordingService {
             sessionName: defaultSessionName,
             startedAt,
             videoSessions: new Map(),
+            cameraSessions: new Map(),
             streamNumberCounters: new Map(),
             pendingFinalizations: new Set(),
         };
@@ -278,15 +314,34 @@ export class RecordingService {
         this.rooms.set(roomName, state);
 
         try {
-            // webcam, screen, AND mic all go through the same per-producer session now, started
-            // concurrently — each is just a cheap RTP stream-copy (see buildRecordingFfmpegArgs),
-            // so there's no CPU contention to stagger against. allSettled (not all) so a slower
-            // producer still gets to register itself in state.videoSessions even if an earlier
-            // one has already failed — teardownRoom() below only cleans up what's actually in
-            // that map, so racing ahead on the first rejection could leak a still-in-flight one.
-            const results = await Promise.allSettled(
-                snapshot.producers.map((producer) => this.startVideoSession(state, snapshot.router, producer)),
-            );
+            // Pair up any peer who already has BOTH a mic and a webcam producer in this initial
+            // snapshot — both are already producing real data, so combining them is always safe
+            // here (see the class doc comment's "Validation spike" note on why that's NOT true for
+            // a producer that doesn't exist yet). Everyone/everything else — a lone mic, a lone
+            // webcam, and every screen producer — goes through the original one-producer-one-session
+            // path, started concurrently since each is just a cheap RTP stream-copy.
+            const combinedPeerIds = new Set<string>();
+            const tasks: Promise<void>[] = [];
+            for (const producer of snapshot.producers) {
+                if (producer.source !== 'mic' || combinedPeerIds.has(producer.peerId)) {
+                    continue;
+                }
+                const webcamSibling = snapshot.producers.find((p) => p.peerId === producer.peerId && p.source === 'webcam');
+                if (webcamSibling) {
+                    combinedPeerIds.add(producer.peerId);
+                    tasks.push(this.startCombinedCameraSession(state, snapshot.router, producer, webcamSibling));
+                }
+            }
+            for (const producer of snapshot.producers) {
+                if (combinedPeerIds.has(producer.peerId) && (producer.source === 'mic' || producer.source === 'webcam')) {
+                    continue;
+                }
+                tasks.push(this.startVideoSession(state, snapshot.router, producer));
+            }
+            // allSettled (not all) so a slower producer still gets to register itself even if an
+            // earlier one has already failed — teardownRoom() below only cleans up what's actually
+            // registered, so racing ahead on the first rejection could leak a still-in-flight one.
+            const results = await Promise.allSettled(tasks);
             const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
             if (failure) {
                 throw failure.reason;
@@ -323,17 +378,22 @@ export class RecordingService {
         this.events.emit('recording-state', { roomName, isRecording: false, startedAt: null });
     }
 
-    /** Fire-and-forget hook for a newly created producer — webcam, screen, or mic, each gets its
-     *  own fully independent recording session. No-op if the room isn't being recorded.
+    /** Fire-and-forget hook for a newly created producer — webcam, screen, or mic. No-op if the
+     *  room isn't being recorded.
      *
      *  A mic producer specifically also logs a 'join' timeline event — this is the ONLY path that
      *  does, deliberately: it's reached exclusively for a producer created WHILE a recording is
-     *  already running (start()'s own initial-snapshot producers go straight to startVideoSession,
-     *  never through here), so it naturally excludes anyone already on a live mic when recording
-     *  begins and naturally covers every later join, however many times someone joins over the
-     *  session's lifetime. Mic start/stop is also exactly the frontend's own MediaRoom.startMic()/
-     *  stopMic() — i.e. "joined/left the call" — regardless of self-mute state (a muted mic still
-     *  produces a silent track, so the producer/recording still exists). */
+     *  already running (start()'s own initial-snapshot producers go straight to
+     *  startVideoSession/startCombinedCameraSession, never through here), so it naturally excludes
+     *  anyone already on a live mic when recording begins and naturally covers every later join,
+     *  however many times someone joins over the session's lifetime. Mic start/stop is also exactly
+     *  the frontend's own MediaRoom.startMic()/stopMic() — i.e. "joined/left the call" — regardless
+     *  of self-mute state (a muted mic still produces a silent track, so the producer/recording
+     *  still exists).
+     *
+     *  Mic and webcam combine here too, but ONLY when the sibling already exists and is already
+     *  recording — see the class doc comment's "Validation spike" note for why a not-yet-existing
+     *  sibling can never be speculatively combined. */
     notifyProducerCreated(roomName: string, router: mediasoupTypes.Router, producer: IRecordingProducerInfo): void {
         const state = this.rooms.get(roomName);
         if (!state) {
@@ -341,6 +401,30 @@ export class RecordingService {
         }
         if (producer.source === 'mic') {
             this.logEvent(state.sessionDbId, 'join', producer.peerId, producer.userId, producer.displayName);
+            // Webcam turned on before mic did (this session) — its solo recording is already
+            // running. Upgrade it into a combined session rather than leaving them separate.
+            const webcamSession = this.findVideoSessionByPeerAndSource(state, producer.peerId, 'webcam');
+            if (webcamSession) {
+                void this.upgradeToCombinedCameraSession(state, router, producer, webcamSession).catch((error: unknown) =>
+                    this.logger.error(`Failed to upgrade to a combined camera session for peer ${producer.peerId}: ${error}`),
+                );
+                return;
+            }
+        } else if (producer.source === 'webcam') {
+            // A camera session whose video half detached earlier (a rare edge case — see
+            // ICombinedCameraSession's own comment) gets this fresh webcam producer attached back
+            // into its still-open video transport, rather than starting a whole new recording.
+            const cameraSession = state.cameraSessions.get(producer.peerId);
+            if (cameraSession && !cameraSession.videoConsumer) {
+                void this.attachWebcamToCameraSession(state, router, cameraSession, producer).catch((error: unknown) =>
+                    this.logger.error(`Failed to attach webcam producer ${producer.producerId} to its camera session: ${error}`),
+                );
+                return;
+            }
+            // Otherwise: a webcam turning on after mic already has its OWN solo recording running
+            // (the common case — most sessions start audio-only) is deliberately NOT retrofitted
+            // into that already-launched ffmpeg process — see the class doc comment. It gets its
+            // own independent 'webcam' file, exactly like today, falling through below.
         }
         void this.startVideoSession(state, router, producer).catch((error: unknown) =>
             this.logger.error(`Failed to start recording ${producer.source} producer ${producer.producerId} in room ${roomName}: ${error}`),
@@ -354,8 +438,37 @@ export class RecordingService {
      *  Mirrors notifyProducerCreated's 'join' logging — a mic producer closing is "left the call". */
     notifyProducerClosing(roomName: string, producerId: string): void {
         const state = this.rooms.get(roomName);
-        const session = state?.videoSessions.get(producerId);
-        if (!state || !session) {
+        if (!state) {
+            return;
+        }
+        for (const [peerId, cameraSession] of state.cameraSessions) {
+            if (cameraSession.audioProducerId === producerId) {
+                // The mic anchoring this combined session closed — "left the call" (or stopped
+                // mic), same as any solo mic session. Ends the whole combined recording; the video
+                // half closing (if it hasn't already, e.g. a peer disconnect closing both at once)
+                // is handled defensively inside finalizeCombinedCameraSession itself.
+                this.logEvent(state.sessionDbId, 'leave', cameraSession.peerId, cameraSession.userId, cameraSession.displayName);
+                state.cameraSessions.delete(peerId);
+                const finalizing = this.finalizeCombinedCameraSession(state, cameraSession).catch((error: unknown) =>
+                    this.logger.error(`Error finalizing combined camera session for producer ${producerId}: ${error}`),
+                );
+                state.pendingFinalizations.add(finalizing);
+                void finalizing.finally(() => state.pendingFinalizations.delete(finalizing));
+                return;
+            }
+            if (cameraSession.videoProducerId === producerId) {
+                // The video half closing for real — not the normal pause/resume toggle (see
+                // MediaRoom.stopWebcam(), which no longer closes), so this should be rare (e.g. an
+                // ICE failure closing the producer server-side). The mic keeps recording solo into
+                // the same file; just detach this slot so a fresh webcam producer can reattach.
+                cameraSession.videoConsumer?.close();
+                cameraSession.videoConsumer = null;
+                cameraSession.videoProducerId = null;
+                return;
+            }
+        }
+        const session = state.videoSessions.get(producerId);
+        if (!session) {
             return;
         }
         if (session.source === 'mic') {
@@ -367,6 +480,63 @@ export class RecordingService {
         );
         state.pendingFinalizations.add(finalizing);
         void finalizing.finally(() => state.pendingFinalizations.delete(finalizing));
+    }
+
+    private findVideoSessionByPeerAndSource(state: IRoomRecordingState, peerId: string, source: StreamSource): IRecordingVideoSession | undefined {
+        return [...state.videoSessions.values()].find((session) => session.peerId === peerId && session.source === source);
+    }
+
+    /** A webcam that was already recording solo (it turned on before mic did, this session) gets
+     *  upgraded into a combined session once mic arrives: its solo file is finalized as a short
+     *  leading clip, and a fresh combined recording starts using the SAME webcam producerId (a new
+     *  Consumer is created for it as part of the new session) — not a retrofit of the already-
+     *  running solo ffmpeg process, which the class doc comment's validation spike ruled out. */
+    private async upgradeToCombinedCameraSession(
+        state: IRoomRecordingState,
+        router: mediasoupTypes.Router,
+        micInfo: IRecordingProducerInfo,
+        existingWebcamSession: IRecordingVideoSession,
+    ): Promise<void> {
+        state.videoSessions.delete(existingWebcamSession.producerId);
+        const finalizing = this.finalizeVideoSession(state, existingWebcamSession).catch((error: unknown) =>
+            this.logger.error(`Error finalizing pre-combine solo webcam recording for producer ${existingWebcamSession.producerId}: ${error}`),
+        );
+        state.pendingFinalizations.add(finalizing);
+        void finalizing.finally(() => state.pendingFinalizations.delete(finalizing));
+
+        await this.startCombinedCameraSession(state, router, micInfo, {
+            producerId: existingWebcamSession.producerId,
+            peerId: existingWebcamSession.peerId,
+            userId: existingWebcamSession.userId ?? micInfo.userId,
+            displayName: existingWebcamSession.displayName,
+            source: 'webcam',
+        });
+    }
+
+    /** Attaches a fresh webcam producer into an existing combined session's already-open video
+     *  transport — used only for the rare "video half detached" case (see notifyProducerClosing's
+     *  videoProducerId branch); the common camera-off/on toggle never reaches this at all, since
+     *  that pauses/resumes the SAME producer rather than closing and recreating it. */
+    private async attachWebcamToCameraSession(
+        state: IRoomRecordingState,
+        router: mediasoupTypes.Router,
+        session: ICombinedCameraSession,
+        webcamInfo: IRecordingProducerInfo,
+    ): Promise<void> {
+        const consumer = await session.videoTransport.consume({
+            producerId: webcamInfo.producerId,
+            rtpCapabilities: router.rtpCapabilities,
+            paused: true,
+        });
+        consumer.on('producerresume', () => {
+            consumer.requestKeyFrame().catch((error: unknown) =>
+                this.logger.warn(`requestKeyFrame after producerresume failed for recording consumer ${consumer.id}: ${error}`),
+            );
+        });
+        session.videoConsumer = consumer;
+        session.videoProducerId = webcamInfo.producerId;
+        await consumer.resume();
+        await consumer.requestKeyFrame().catch(() => undefined);
     }
 
     private async startVideoSession(
@@ -547,6 +717,178 @@ export class RecordingService {
         throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
+    /** Starts ONE combined recording spanning a peer's mic AND webcam — a single ffmpeg process
+     *  with two RTP inputs muxed into one file (see buildCombinedRecordingFfmpegArgs), so playback
+     *  gets the browser's own native A/V sync instead of two wall-clock-synced files. Both
+     *  producers must already exist and be producing real data by the time this is called — see
+     *  the class doc comment's "Validation spike" note for why a not-yet-live input can't work.
+     *  Otherwise mirrors startVideoSession's shape closely: same retry-with-fresh-ports policy on
+     *  any failure, same reasoning throughout for what's captured when. */
+    private async startCombinedCameraSession(
+        state: IRoomRecordingState,
+        router: mediasoupTypes.Router,
+        micInfo: IRecordingProducerInfo,
+        webcamInfo: IRecordingProducerInfo,
+    ): Promise<void> {
+        const timestamp = this.formatTimestampUtc(new Date());
+        const streamNumber = this.nextStreamNumber(state, `${micInfo.peerId}:camera`);
+        const outputPath = path.join(
+            this.recordingsDir,
+            this.buildFilename(state.roomName, micInfo.displayName, 'camera', streamNumber, timestamp, micInfo.peerId),
+        );
+
+        const MAX_ATTEMPTS = 3;
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            const audioTransport = await router.createPlainTransport({
+                listenInfo: { protocol: 'udp', ip: '127.0.0.1' },
+                rtcpMux: true,
+                comedia: false,
+            });
+            const videoTransport = await router.createPlainTransport({
+                listenInfo: { protocol: 'udp', ip: '127.0.0.1' },
+                rtcpMux: true,
+                comedia: false,
+            });
+            const destPortAudio = this.allocatePort();
+            const destPortVideo = this.allocatePort();
+            let audioSdpPath: string | null = null;
+            let videoSdpPath: string | null = null;
+            let ffmpeg: ChildProcess | null = null;
+            try {
+                await audioTransport.connect({ ip: '127.0.0.1', port: destPortAudio });
+                const audioConsumer = await audioTransport.consume({
+                    producerId: micInfo.producerId,
+                    rtpCapabilities: router.rtpCapabilities,
+                    paused: true,
+                });
+                await videoTransport.connect({ ip: '127.0.0.1', port: destPortVideo });
+                const videoConsumer = await videoTransport.consume({
+                    producerId: webcamInfo.producerId,
+                    rtpCapabilities: router.rtpCapabilities,
+                    paused: true,
+                });
+                // Mirrors RoomService.consume()'s identical listener for a live remote viewer's
+                // consumer — a producer resume (camera back on) doesn't itself trigger a keyframe,
+                // so without this the recording would wait on the sender's own next natural
+                // keyframe interval after every camera toggle instead of getting one immediately.
+                videoConsumer.on('producerresume', () => {
+                    videoConsumer.requestKeyFrame().catch((error: unknown) =>
+                        this.logger.warn(`requestKeyFrame after producerresume failed for recording consumer ${videoConsumer.id}: ${error}`),
+                    );
+                });
+
+                const audioCodec = audioConsumer.rtpParameters.codecs[0];
+                const videoCodec = videoConsumer.rtpParameters.codecs[0];
+                audioSdpPath = path.join(this.sdpScratchDir, `${micInfo.producerId}-${Date.now()}-${attempt}.sdp`);
+                videoSdpPath = path.join(this.sdpScratchDir, `${webcamInfo.producerId}-${Date.now()}-${attempt}.sdp`);
+                await fs.writeFile(audioSdpPath, this.buildSdp(destPortAudio, audioCodec, 'audio'));
+                await fs.writeFile(videoSdpPath, this.buildSdp(destPortVideo, videoCodec, 'video'));
+
+                ffmpeg = await this.spawnFfmpegAndWaitReady(
+                    this.buildCombinedRecordingFfmpegArgs(audioSdpPath, videoSdpPath, this.tempRecordingPath(outputPath)),
+                    `camera ${micInfo.peerId} audioPort=${destPortAudio} videoPort=${destPortVideo} attempt=${attempt}`,
+                );
+
+                await audioConsumer.resume();
+                // Same discipline as startVideoSession: the reference point for this recording's
+                // place on the playback timeline is when media actually started flowing, not when
+                // the verification below finishes.
+                const mediaStartedAt = new Date();
+                await videoConsumer.resume();
+                await videoConsumer.requestKeyFrame();
+
+                await this.waitForRecordingToStart(this.tempRecordingPath(outputPath), videoConsumer, true);
+
+                const dbId = randomUUID();
+                const startedAt = mediaStartedAt;
+                const created = await this.prisma.recording
+                    .create({
+                        data: {
+                            id: dbId,
+                            room: { connectOrCreate: { where: { name: state.roomName }, create: { name: state.roomName } } },
+                            session: { connect: { id: state.sessionDbId } },
+                            user: { connect: { id: micInfo.userId } },
+                            displayName: micInfo.displayName,
+                            streamType: 'camera',
+                            streamNumber,
+                            filename: path.basename(outputPath),
+                            startedAt,
+                        },
+                        include: { user: true },
+                    })
+                    .catch((error: unknown) => {
+                        this.logger.error(`Failed to persist combined camera recording metadata for peer ${micInfo.peerId}: ${error}`);
+                        return null;
+                    });
+                if (created) {
+                    this.events.emit('recording-added', {
+                        sessionId: state.sessionDbId,
+                        recordingId: dbId,
+                        filename: path.basename(outputPath),
+                        streamType: 'camera',
+                        displayName: micInfo.displayName,
+                        userId: created.userId,
+                        pictureUrl: created.user?.pictureUrl ?? null,
+                        startedAt: startedAt.toISOString(),
+                    });
+                }
+
+                state.cameraSessions.set(micInfo.peerId, {
+                    peerId: micInfo.peerId,
+                    userId: micInfo.userId,
+                    displayName: micInfo.displayName,
+                    dbId,
+                    audioProducerId: micInfo.producerId,
+                    videoProducerId: webcamInfo.producerId,
+                    audioTransport,
+                    audioConsumer,
+                    videoTransport,
+                    videoConsumer,
+                    audioSdpPath,
+                    videoSdpPath,
+                    destPortAudio,
+                    destPortVideo,
+                    outputPath,
+                    ffmpeg,
+                });
+
+                // Same grace-period reasoning as startVideoSession's own live-thumbnail scheduling.
+                const GRACE_MS = 3000;
+                setTimeout(() => {
+                    const current = state.cameraSessions.get(micInfo.peerId);
+                    if (!current || current.dbId !== dbId) {
+                        return;
+                    }
+                    void this.generateLiveThumbnail(state, current).catch((error: unknown) =>
+                        this.logger.warn(`Live thumbnail generation failed for combined camera recording (peer ${micInfo.peerId}): ${error}`),
+                    );
+                }, GRACE_MS);
+                return;
+            } catch (error) {
+                lastError = error;
+                this.releasePort(destPortAudio);
+                this.releasePort(destPortVideo);
+                audioTransport.close();
+                videoTransport.close();
+                if (audioSdpPath) {
+                    void fs.unlink(audioSdpPath).catch(() => undefined);
+                }
+                if (videoSdpPath) {
+                    void fs.unlink(videoSdpPath).catch(() => undefined);
+                }
+                if (ffmpeg && ffmpeg.exitCode === null && ffmpeg.signalCode === null) {
+                    ffmpeg.kill('SIGKILL');
+                }
+                void fs.unlink(this.tempRecordingPath(outputPath)).catch(() => undefined);
+                this.logger.warn(
+                    `Combined camera session start attempt ${attempt}/${MAX_ATTEMPTS} failed for peer ${micInfo.peerId}: ${error instanceof Error ? error.message : error}`,
+                );
+            }
+        }
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+
     /**
      * Confirms the temp recording file has actually started receiving real bytes before
      * startVideoSession treats an attempt as successful. consumer.requestKeyFrame() sends a
@@ -694,6 +1036,45 @@ export class RecordingService {
         ];
     }
 
+    /** Two-input variant for a combined mic+webcam session (see startCombinedCameraSession) —
+     *  otherwise identical to buildRecordingFfmpegArgs above, same reasoning throughout for every
+     *  flag shared between them. Two differences, both confirmed necessary by the validation spike
+     *  documented in this file's class doc comment:
+     *  - `-protocol_whitelist file,udp,rtp` must be repeated before EACH `-i`, not passed once —
+     *    ffmpeg's CLI applies it to only the next input; a single shared copy left the second
+     *    input rejected outright ("Protocol 'rtp' not on whitelist").
+     *  - Explicit `-map 0:a -map 1:v`, since relying on ffmpeg's automatic stream-selection
+     *    heuristics across two different-media-type inputs (safe for buildRecordingFfmpegArgs,
+     *    which only ever has one) isn't something to lean on here. */
+    private buildCombinedRecordingFfmpegArgs(audioSdpPath: string, videoSdpPath: string, tempOutputPath: string): string[] {
+        return [
+            '-n',
+            '-protocol_whitelist',
+            'file,udp,rtp',
+            '-use_wallclock_as_timestamps',
+            '1',
+            '-i',
+            audioSdpPath,
+            '-protocol_whitelist',
+            'file,udp,rtp',
+            '-use_wallclock_as_timestamps',
+            '1',
+            '-i',
+            videoSdpPath,
+            '-map',
+            '0:a',
+            '-map',
+            '1:v',
+            '-c',
+            'copy',
+            '-flush_packets',
+            '1',
+            '-cluster_time_limit',
+            '500',
+            tempOutputPath,
+        ];
+    }
+
     /** Splits into two phases on purpose: the recording becomes locally available and its
      *  `stoppedAt` lands the moment remux finishes, WITHOUT waiting on the GCS upload (which can
      *  lag well behind) — the fire-and-forget thumbnail/upload steps below run after this method
@@ -734,6 +1115,45 @@ export class RecordingService {
         }
     }
 
+    /** Combined-session counterpart to finalizeVideoSession above — same two-phase shape and
+     *  reasoning, just closing two transports/consumers/ports/sdp files instead of one. A camera
+     *  session always has video, so (unlike finalizeVideoSession) there's no `source !== 'mic'`
+     *  check before generating a thumbnail. */
+    private async finalizeCombinedCameraSession(state: IRoomRecordingState, session: ICombinedCameraSession): Promise<void> {
+        await this.stopFfmpegGracefully(session.ffmpeg);
+        session.audioConsumer.close();
+        session.audioTransport.close();
+        this.releasePort(session.destPortAudio);
+        void fs.unlink(session.audioSdpPath).catch(() => undefined);
+        session.videoConsumer?.close();
+        session.videoTransport.close();
+        this.releasePort(session.destPortVideo);
+        void fs.unlink(session.videoSdpPath).catch(() => undefined);
+
+        const hasContent = await this.remuxToFinalFile(this.tempRecordingPath(session.outputPath), session.outputPath);
+
+        const stoppedAt = new Date();
+        await this.prisma.recording
+            .update({ where: { id: session.dbId }, data: { stoppedAt, hasContent } })
+            .catch((error: unknown) => this.logger.error(`Failed to record stoppedAt for combined camera recording ${session.dbId}: ${error}`));
+        this.events.emit('recording-ready', {
+            sessionId: state.sessionDbId,
+            recordingId: session.dbId,
+            url: hasContent ? this.buildLocalFileUrl(path.basename(session.outputPath)) : null,
+            stoppedAt: stoppedAt.toISOString(),
+            hasContent,
+        });
+
+        if (hasContent) {
+            void this.generateFinalThumbnail(state, session).catch((error: unknown) =>
+                this.logger.warn(`Final thumbnail generation failed for combined camera recording ${session.dbId}: ${error}`),
+            );
+            void this.uploadAndNotify(state, session.outputPath, session.dbId).catch((error: unknown) =>
+                this.logger.error(`Post-finalize GCS upload failed for combined camera recording ${session.dbId}: ${error}`),
+            );
+        }
+    }
+
     private async teardownRoom(state: IRoomRecordingState): Promise<void> {
         // Finalizes whatever's still open, concurrently, AND waits for anything already
         // finalizing in the background from an earlier individual stream stop (see
@@ -741,6 +1161,7 @@ export class RecordingService {
         // -c copy remux, so there's no CPU contention to stagger against.
         await Promise.all([
             ...[...state.videoSessions.values()].map((session) => this.finalizeVideoSession(state, session)),
+            ...[...state.cameraSessions.values()].map((session) => this.finalizeCombinedCameraSession(state, session)),
             ...state.pendingFinalizations,
         ]);
     }
@@ -837,8 +1258,10 @@ export class RecordingService {
      *  only after the recording stops. Reading a still-being-appended fragmented mp4 with a second
      *  ffmpeg process is a real (if generally safe on Linux) race against the writer — this never
      *  throws into its caller, it just silently leaves thumbnailStatus null on failure, and
-     *  generateFinalThumbnail always covers it properly once the recording actually stops. */
-    private async generateLiveThumbnail(state: IRoomRecordingState, session: IRecordingVideoSession): Promise<void> {
+     *  generateFinalThumbnail always covers it properly once the recording actually stops.
+     *  Structurally typed on just the two fields it needs, rather than IRecordingVideoSession
+     *  specifically, so ICombinedCameraSession (a combined mic+webcam session) can reuse this too. */
+    private async generateLiveThumbnail(state: IRoomRecordingState, session: { outputPath: string; dbId: string }): Promise<void> {
         const tempPath = this.tempRecordingPath(session.outputPath);
         const thumbPath = this.thumbnailPath(session.outputPath);
         await this.runFfmpegToCompletion(
@@ -857,8 +1280,9 @@ export class RecordingService {
 
     /** The "real" thumbnail, extracted from the final indexed mp4 once the recording has actually
      *  stopped and remuxed — replaces the live grayscale one (same derived filename, different
-     *  thumbnailUpdatedAt cache-busts it) with a full-color frame. Best-effort, same as above. */
-    private async generateFinalThumbnail(state: IRoomRecordingState, session: IRecordingVideoSession): Promise<void> {
+     *  thumbnailUpdatedAt cache-busts it) with a full-color frame. Best-effort, same as above.
+     *  Structurally typed for the same reason as generateLiveThumbnail above. */
+    private async generateFinalThumbnail(state: IRoomRecordingState, session: { outputPath: string; dbId: string }): Promise<void> {
         const thumbPath = this.thumbnailPath(session.outputPath);
         await this.runFfmpegToCompletion(
             ['-y', '-ss', '1', '-i', session.outputPath, '-frames:v', '1', '-vf', 'scale=320:-1', thumbPath],

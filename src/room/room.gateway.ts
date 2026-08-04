@@ -35,8 +35,10 @@ import type {
     IConsumePayload,
     ICreateTransportPayload,
     IJoinRoomPayload,
+    IPauseProducerPayload,
     IProducePayload,
     IResumeConsumerPayload,
+    IResumeProducerPayload,
     ISaveUserSettingPayload,
     ISetConsumerQualityPayload,
 } from './interfaces/room.interfaces';
@@ -266,7 +268,7 @@ export class RoomGateway implements OnGatewayDisconnect {
 
     @SubscribeMessage('produce')
     async onProduce(@ConnectedSocket() socket: Socket, @MessageBody() payload: IProducePayload) {
-        const summary = await this.roomService.produce(socket.id, payload.kind, payload.rtpParameters, payload.source);
+        const summary = await this.roomService.produce(socket.id, payload.kind, payload.rtpParameters, payload.source, payload.synthetic);
         const roomName = socket.data.roomName as string;
         socket.to(roomName).emit('new-producer', summary);
         return { id: summary.producerId };
@@ -279,6 +281,30 @@ export class RoomGateway implements OnGatewayDisconnect {
             return { ok: false };
         }
         socket.to(result.roomName).emit('producer-closed', { producerId: payload.producerId });
+        return { ok: true };
+    }
+
+    /** Camera-off — pauses rather than closes (see MediaRoom.stopWebcam()), so remote viewers must
+     *  be told explicitly to fall back to an avatar tile; unlike a close, no consumer/track teardown
+     *  happens on its own. */
+    @SubscribeMessage('pause-producer')
+    async onPauseProducer(@ConnectedSocket() socket: Socket, @MessageBody() payload: IPauseProducerPayload) {
+        const result = await this.roomService.pauseProducer(socket.id, payload.producerId);
+        if (!result) {
+            return { ok: false };
+        }
+        socket.to(result.roomName).emit('producer-paused', { producerId: payload.producerId });
+        return { ok: true };
+    }
+
+    /** Camera back on, paired with the frontend's replaceTrack() on the same (still-open) producer. */
+    @SubscribeMessage('resume-producer')
+    async onResumeProducer(@ConnectedSocket() socket: Socket, @MessageBody() payload: IResumeProducerPayload) {
+        const result = await this.roomService.resumeProducer(socket.id, payload.producerId);
+        if (!result) {
+            return { ok: false };
+        }
+        socket.to(result.roomName).emit('producer-resumed', { producerId: payload.producerId });
         return { ok: true };
     }
 
