@@ -13,8 +13,9 @@ export interface IUploadedChatMedia {
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
-const DEFAULT_MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+const DEFAULT_MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 const DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+const DEFAULT_MAX_PDF_BYTES = 50 * 1024 * 1024;
 
 const EXTENSION_BY_MIME_TYPE: Record<string, string> = {
     'image/jpeg': 'jpg',
@@ -23,10 +24,11 @@ const EXTENSION_BY_MIME_TYPE: Record<string, string> = {
     'image/webp': 'webp',
     'video/mp4': 'mp4',
     'video/webm': 'webm',
+    'application/pdf': 'pdf',
 };
 
 /**
- * Uploads chat image/video/gif attachments — mirrors RecordingService's GCS/ADC/bucket-name-env-var
+ * Uploads chat image/video/gif/pdf attachments — mirrors RecordingService's GCS/ADC/bucket-name-env-var
  * pattern (see that file's own gcsBucketName/storage fields), but into a SEPARATE bucket (its own
  * lifecycle/permissions, kept independent of recordings) and via a buffer-based upload rather than
  * RecordingService.uploadToGcsIfConfigured's local-file-path one, since this always starts from an
@@ -50,6 +52,7 @@ export class ChatMediaService {
     // zero-byte cap that rejects every upload.
     private readonly maxImageBytes = Number(process.env.CHAT_MEDIA_MAX_IMAGE_BYTES) || DEFAULT_MAX_IMAGE_BYTES;
     private readonly maxVideoBytes = Number(process.env.CHAT_MEDIA_MAX_VIDEO_BYTES) || DEFAULT_MAX_VIDEO_BYTES;
+    private readonly maxPdfBytes = Number(process.env.CHAT_MEDIA_MAX_PDF_BYTES) || DEFAULT_MAX_PDF_BYTES;
 
     /** The URL prefix every genuine upload's `url` starts with — used by room.gateway.ts's
      *  isAllowedAttachmentUrl to reject anything that doesn't actually come from here. Root-relative
@@ -65,6 +68,7 @@ export class ChatMediaService {
     static readonly MAX_UPLOAD_BYTES = Math.max(
         Number(process.env.CHAT_MEDIA_MAX_IMAGE_BYTES) || DEFAULT_MAX_IMAGE_BYTES,
         Number(process.env.CHAT_MEDIA_MAX_VIDEO_BYTES) || DEFAULT_MAX_VIDEO_BYTES,
+        Number(process.env.CHAT_MEDIA_MAX_PDF_BYTES) || DEFAULT_MAX_PDF_BYTES,
     );
 
     /** Validates (magic-byte sniff, not the client's claimed Content-Type/filename), then uploads
@@ -76,9 +80,10 @@ export class ChatMediaService {
             throw new UnsupportedMediaTypeException('Unsupported or unrecognized file type');
         }
         const isImage = IMAGE_TYPES.has(sniffed);
-        const cap = isImage ? this.maxImageBytes : this.maxVideoBytes;
+        const isPdf = sniffed === 'application/pdf';
+        const cap = isImage ? this.maxImageBytes : isPdf ? this.maxPdfBytes : this.maxVideoBytes;
         if (buffer.length > cap) {
-            throw new PayloadTooLargeException(`File exceeds the ${isImage ? 'image' : 'video'} size limit`);
+            throw new PayloadTooLargeException(`File exceeds the ${isImage ? 'image' : isPdf ? 'pdf' : 'video'} size limit`);
         }
 
         const objectPath = `${this.sanitize(roomName)}/${new Date().getUTCFullYear()}/${String(new Date().getUTCMonth() + 1).padStart(2, '0')}/${randomUUID()}.${EXTENSION_BY_MIME_TYPE[sniffed]}`;

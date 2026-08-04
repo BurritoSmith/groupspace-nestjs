@@ -1,7 +1,7 @@
 /**
  * Magic-byte content sniffing for chat media uploads — deliberately NOT trusting the client-
  * supplied filename/Content-Type, since either can be forged (a malicious upload could name a
- * script ".jpg" or lie about its Content-Type header). Only the six formats the chat-media
+ * script ".jpg" or lie about its Content-Type header). Only the formats the chat-media
  * pipeline actually accepts are recognized; everything else (including a real but unsupported
  * format like HEIC or AVI) sniffs as null and gets rejected by the caller.
  *
@@ -10,7 +10,7 @@
  * that mismatch.
  */
 
-export type SniffedMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' | 'video/mp4' | 'video/webm';
+export type SniffedMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' | 'video/mp4' | 'video/webm' | 'application/pdf';
 
 // MP4/MOV ("ISO base media file format") brands we're willing to accept as "this is a real video
 // a browser produced," not an exhaustive list of every brand that has ever existed.
@@ -56,6 +56,10 @@ export function sniffMediaType(buffer: Buffer): SniffedMediaType | null {
         if (MP4_BRAND_ALLOWLIST.has(brand)) {
             return 'video/mp4';
         }
+    }
+
+    if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46 && buffer[4] === 0x2d) {
+        return 'application/pdf';
     }
 
     return null;

@@ -18,6 +18,11 @@ function jpegBuffer(totalBytes = 100): Buffer {
     return Buffer.concat([header, Buffer.alloc(Math.max(0, totalBytes - header.length))]);
 }
 
+function pdfBuffer(totalBytes = 100): Buffer {
+    const header = Buffer.from('%PDF-1.7\n', 'ascii');
+    return Buffer.concat([header, Buffer.alloc(Math.max(0, totalBytes - header.length))]);
+}
+
 describe('ChatMediaService', () => {
     const originalEnv = process.env;
 
@@ -137,8 +142,25 @@ describe('ChatMediaService', () => {
             process.env.CHAT_MEDIA_MAX_IMAGE_BYTES = '';
             const service = new ChatMediaService();
 
-            // Well under the 15MB default — must NOT be rejected as if the cap were 0.
+            // Well under the 50MB default — must NOT be rejected as if the cap were 0.
             await expect(service.uploadAttachment(jpegBuffer(1000), 'lobby', 'image/jpeg')).resolves.toBeDefined();
+        });
+
+        it('accepts a PDF, stored with a .pdf extension', async () => {
+            const service = new ChatMediaService();
+
+            const result = await service.uploadAttachment(pdfBuffer(), 'lobby', 'application/pdf');
+
+            expect(result.mimeType).toBe('application/pdf');
+            expect(result.storagePath).toMatch(/\.pdf$/);
+        });
+
+        it('enforces the PDF size cap independently of the image cap', async () => {
+            process.env.CHAT_MEDIA_MAX_PDF_BYTES = '50';
+            const service = new ChatMediaService();
+
+            await expect(service.uploadAttachment(pdfBuffer(200), 'lobby', 'application/pdf')).rejects.toBeInstanceOf(PayloadTooLargeException);
+            expect(mockSave).not.toHaveBeenCalled();
         });
     });
 });

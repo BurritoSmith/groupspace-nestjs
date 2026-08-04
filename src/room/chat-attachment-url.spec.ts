@@ -113,6 +113,12 @@ describe('sanitizeAttachment', () => {
         expect(sanitizeAttachment(baseAttachment({ kind: 'audio' }), GCS_BASE)).toBeNull();
     });
 
+    it('accepts a pdf attachment from our own storage', () => {
+        const result = sanitizeAttachment(baseAttachment({ kind: 'pdf', url: `${GCS_BASE}lobby/2026/07/doc.pdf`, mimeType: 'application/pdf' }), GCS_BASE);
+
+        expect(result?.kind).toBe('pdf');
+    });
+
     it('generates a fresh id when the client omitted one', () => {
         const result = sanitizeAttachment(baseAttachment({ id: undefined }), GCS_BASE);
 
