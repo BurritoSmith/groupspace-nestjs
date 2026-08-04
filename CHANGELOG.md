@@ -11,6 +11,12 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.3] - 2026-08-04
+
+### Added
+
+- Add an invitation-code gate ahead of the app, and record which code let each user in ([#46](https://github.com/BurritoSmith/groupspace-nestjs/pull/46))
+
 ## [0.27.2] - 2026-08-03
 
 ### Added
@@ -373,7 +379,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.2...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.3...HEAD
+[0.27.3]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.2...v0.27.3
 [0.27.2]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.1...v0.27.2
 [0.27.1]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.26.0...v0.27.0
