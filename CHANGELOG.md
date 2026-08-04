@@ -11,6 +11,13 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.6] - 2026-08-04
+
+### Added
+
+- Add server-side video poster fallback for missing/mismatched thumbnails ([#49](https://github.com/BurritoSmith/groupspace-nestjs/pull/49))
+- Add docs/plans entry for the video poster fallback ([#49](https://github.com/BurritoSmith/groupspace-nestjs/pull/49))
+
 ## [0.27.5] - 2026-08-04
 
 ### Added
@@ -391,7 +398,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.5...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.6...HEAD
+[0.27.6]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.5...v0.27.6
 [0.27.5]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.4...v0.27.5
 [0.27.4]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.3...v0.27.4
 [0.27.3]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.2...v0.27.3

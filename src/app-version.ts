@@ -8,7 +8,7 @@
  * Keep the shape: `docs/versioning.md` and .github/workflows/deploy.yml both depend on these two
  * lines being rewritable by a regex.
  */
-export const APP_VERSION = '0.27.5';
+export const APP_VERSION = '0.27.6';
 export const BUILD_DATE = '2026-08-04';
 
 /** When this process came up. Distinguishes "the deploy landed" from "the container has been
