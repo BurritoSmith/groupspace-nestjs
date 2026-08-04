@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { sniffedTypeMatchesDeclared, sniffMediaType } from './file-sniff';
+import { PdfThumbnailService } from './pdf-thumbnail.service';
 
 export interface IUploadedChatMedia {
     url: string;
@@ -71,6 +72,8 @@ export class ChatMediaService {
         Number(process.env.CHAT_MEDIA_MAX_PDF_BYTES) || DEFAULT_MAX_PDF_BYTES,
     );
 
+    constructor(private readonly pdfThumbnails: PdfThumbnailService) {}
+
     /** Validates (magic-byte sniff, not the client's claimed Content-Type/filename), then uploads
      *  a chat attachment. Throws PayloadTooLargeException/UnsupportedMediaTypeException — the
      *  controller lets Nest's own exception filter turn those into the matching HTTP status. */
@@ -101,6 +104,29 @@ export class ChatMediaService {
         await fs.mkdir(path.dirname(localPath), { recursive: true });
         await fs.writeFile(localPath, buffer);
         return { url: `${this.publicBase}${objectPath}`, storagePath: null, mimeType: sniffed };
+    }
+
+    /**
+     * Renders and uploads a thumbnail for a just-uploaded PDF, returning its URL and pixel size —
+     * or null for every reason including failure, exactly like the client-generated thumbnails
+     * uploaded alongside an image/video (see ChatUploads.uploadSideCar's own comment): a missing
+     * thumbnail costs the chat list its cheap source, not the send.
+     *
+     * The upload goes through uploadAttachment() itself, same as any other file — the rendered
+     * thumbnail is a plain JPEG, sniffs and stores exactly like one a user attached directly.
+     */
+    async generatePdfThumbnail(buffer: Buffer, roomName: string): Promise<{ url: string; width: number; height: number } | null> {
+        const rendered = await this.pdfThumbnails.generate(buffer);
+        if (!rendered) {
+            return null;
+        }
+        try {
+            const uploaded = await this.uploadAttachment(rendered.buffer, roomName, 'image/jpeg');
+            return { url: uploaded.url, width: rendered.width, height: rendered.height };
+        } catch (error) {
+            this.logger.warn(`Failed to upload generated pdf thumbnail: ${error instanceof Error ? error.message : String(error)}`);
+            return null;
+        }
     }
 
     private sanitize(value: string): string {
