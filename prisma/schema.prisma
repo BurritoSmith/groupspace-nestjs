@@ -8,13 +8,16 @@ datasource db {
 }
 
 model User {
-  id          String   @id @default(uuid())
-  googleSub   String   @unique
-  email       String
-  displayName String
-  pictureUrl  String
-  createdAt   DateTime @default(now())
-  lastSeenAt  DateTime @updatedAt // bumped automatically by Prisma on every update()/upsert()-update
+  id             String   @id @default(uuid())
+  googleSub      String   @unique
+  email          String
+  displayName    String
+  pictureUrl     String
+  createdAt      DateTime @default(now())
+  lastSeenAt     DateTime @updatedAt // bumped automatically by Prisma on every update()/upsert()-update
+  invitationCode String? // whichever code got them through the gate — set once at creation only
+  // (UsersService.upsertFromGoogleProfile never touches it on an update), so it's a permanent
+  // record of how someone originally got in, not something a later re-invite would overwrite.
 
   chatMessages  ChatMessage[]
   chatReactions ChatMessageReaction[]
@@ -39,6 +42,15 @@ model UserSetting {
 
   @@unique([userId, key, deviceId])
   @@index([userId])
+}
+
+// The invitation-code gate the frontend shows before anyone reaches Google sign-in — a row here
+// (added/removed directly via DBeaver, not an admin UI) is what "invited" means. Matched
+// case-insensitively (see InvitationsService), so storage case doesn't matter.
+model Invitation {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  createdAt DateTime @default(now())
 }
 
 model Room {

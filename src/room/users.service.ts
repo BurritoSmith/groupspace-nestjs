@@ -12,8 +12,11 @@ export interface IUserRecord {
 export class UsersService {
     constructor(private readonly prisma: PrismaService) {}
 
-    /** Upserts by Google's stable per-account `sub`; User.lastSeenAt (@updatedAt) bumps automatically. */
-    async upsertFromGoogleProfile(profile: IGoogleProfile): Promise<IUserRecord> {
+    /** Upserts by Google's stable per-account `sub`; User.lastSeenAt (@updatedAt) bumps automatically.
+     *  `invitationCode` — whichever code the frontend's gate was satisfied with — is written only on
+     *  CREATE, never on an update: it's a record of how this person originally got in, and a later
+     *  join (which may carry no code at all, e.g. a resumed session) must not blank it out. */
+    async upsertFromGoogleProfile(profile: IGoogleProfile, invitationCode?: string): Promise<IUserRecord> {
         const user = await this.prisma.user.upsert({
             where: { googleSub: profile.googleSub },
             create: {
@@ -21,6 +24,7 @@ export class UsersService {
                 email: profile.email,
                 displayName: profile.displayName,
                 pictureUrl: profile.pictureUrl,
+                invitationCode: invitationCode ?? null,
             },
             update: {
                 email: profile.email,

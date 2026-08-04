@@ -7,6 +7,8 @@ import { ChatService } from './chat.service';
 import { GifsController } from './gifs.controller';
 import { GiphyService } from './giphy.service';
 import { GoogleAuthService } from './google-auth.service';
+import { InvitationsController } from './invitations.controller';
+import { InvitationsService } from './invitations.service';
 import { LinkPreviewService } from './link-preview.service';
 import { RecordingService } from './recording.service';
 import { RoomGateway } from './room.gateway';
@@ -36,7 +38,7 @@ import { UserSettingsService } from './user-settings.service';
             },
         }),
     ],
-    controllers: [ChatMediaController, GifsController, UserSettingsController],
+    controllers: [ChatMediaController, GifsController, InvitationsController, UserSettingsController],
     providers: [
         RoomGateway,
         RoomService,
@@ -52,6 +54,7 @@ import { UserSettingsService } from './user-settings.service';
         LinkPreviewService,
         GiphyService,
         SessionAuthGuard,
+        InvitationsService,
     ],
 })
 export class RoomModule {}
