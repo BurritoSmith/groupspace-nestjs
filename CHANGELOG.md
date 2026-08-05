@@ -11,6 +11,18 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.13] - 2026-08-05
+
+### Added
+
+- Route push per platform so a native app never doubles up on the browser ([#56](https://github.com/BurritoSmith/groupspace-nestjs/pull/56))
+- Record where the Capacitor work diverged from its plan ([#56](https://github.com/BurritoSmith/groupspace-nestjs/pull/56))
+- Note in the plan record that the native projects are uncompiled locally ([#56](https://github.com/BurritoSmith/groupspace-nestjs/pull/56))
+
+### Changed
+
+- Correct the notification-icon plan to match what shipped
+
 ## [0.27.12] - 2026-08-05
 
 ### Added
@@ -436,7 +448,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.12...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.13...HEAD
+[0.27.13]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.12...v0.27.13
 [0.27.12]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.11...v0.27.12
 [0.27.11]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.10...v0.27.11
 [0.27.10]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.9...v0.27.10
