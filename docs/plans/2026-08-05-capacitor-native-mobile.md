@@ -373,115 +373,147 @@ compression stack with native transcode; and Android `MediaProjection` screen sh
 
 ---
 
-# As shipped
+# Status — 2026-08-05
 
-Recorded after implementation, so the plan above stays what was approved and this is where it
-turned out to be wrong. Frontend commits `b76b0d7`, `e99bfea`, `9ee71e6`, `fada2ce`; backend
-`c55d96a`. 1970 frontend tests, 461 backend, both suites and both builds green.
+The plan above is what was approved. Everything below is the current state: what shipped, what it
+cost to learn, and what a next session should pick up. **Start here.**
 
-## Where reality differed
+Backend: merged as PR #56 and deployed. Frontend: `feature/capacitor-native-mobile`.
+1986 frontend tests, 461 backend, both builds clean.
 
-**Capacitor 8's iOS uses Swift Package Manager, not CocoaPods.** The plan assumed `pod install` was
-the one step needing macOS. There is no Podfile at all — `cap sync ios` regenerates a
-`Package.swift` from the installed plugins. So the CI job is `xcodebuild -project`, not
-`-workspace`, with no Ruby toolchain, and iOS drift is even cheaper to catch than planned.
+## Phase 1 — done, and running on a real device
 
-**AppInstaller has no iOS implementation, deliberately.** An unregistered Capacitor plugin already
-rejects with "not implemented", which is the correct answer where no package installer exists.
-`AppUpdate` treats a rejection from `isSupported()` as unsupported, so a Swift file whose only job
-was to refuse would have been a file to maintain and compile for no behavioural difference.
+Verified on a OnePlus CPH2655, **Android 16 / SDK 36** (which forces edge-to-edge, so it is a good
+worst case for layout): sign-in, joining a room, chat, avatars, safe areas, hardware Back, keyboard
+resize, Firebase initialising, and all 16 Capacitor plugins registering — including the two custom
+ones.
 
-**`chat.ts` keeps `DesktopBridge.isDesktop`.** The plan said all three consumers move to
-`PlatformShell`. Two did. The third guards a call *into* the Electron API (`isWindowFocused`,
-`focusWindow`), where "is the bridge there?" is the right question and belongs with the bridge. The
-split is documented in `platform-shell.ts` so it does not read as an oversight.
+Shipped: Capacitor scaffolding for both platforms · `PlatformShell` seam · native Google Sign-In ·
+FCM push with platform-matched dedup · durable credential mirroring · native shell wiring · the
+stale-tab web reload prompt · the Android release pipeline and update flow · CI that compiles both
+native projects on every PR.
 
-**Native storage is restored in `main.ts`, not an app initializer.** Angular runs initializers in
-*parallel*, and one of them (`Language`) transitively constructs `User`, which reads localStorage
-synchronously in its constructor — so an initializer could never reliably win that race. Doing it
-before `bootstrapApplication` can.
+## Phase 2.1 — done
 
-**`AppUpdate` compares `versionName`, not `versionCode`.** That lets both update checks — web and
-native — share one comparator (`compare-versions.ts`) instead of two mechanisms that would
-eventually disagree. `versionCode` remains Android's own install-time concern, which it enforces
-itself by refusing an APK that does not increase it.
+Saving and copying were dead on the phone and now work. Download opens Android's **save picker**
+(Storage Access Framework), not the share sheet — sharing hands a file to another app, saving puts
+it where the user asked, and the download button means the second. `@capacitor/share` is installed
+but unused; an explicit share action is its own control, wanted later.
 
-**The versionCode derivation self-tests instead of having a spec.** `tsconfig.spec.json` only
-includes `src/**/*.spec.ts`, and the derivation belongs to the build scripts. It runs as
-`node scripts/version-code.mjs --self-test`, which the Android workflow executes before building.
+## Phase 2 — remaining, in the order agreed
 
-**`APP_INSTALLER` is an InjectionToken.** Angular's unit-test system refuses `vi.mock` on relative
-imports and directs you to TestBed, so a module-level plugin import would have left the whole update
-flow untestable.
+1. **2.2 Camera capture** — the biggest gap. There is no way to take a photo from the composer on
+   ANY platform today; the file input is gallery-only. Must emit JPEG (see the HEIC question below).
+2. **2.3 Haptics + native keep-awake** replacing `wake-lock.ts`.
+3. **2.4 Android share target** — intent filters, a handler, and a "which room?" screen.
+4. **2.5 Native video transcode**, dropping the ffmpeg.wasm tier.
+5. **2.6 MediaProjection screen share** — currently hidden on native, which is not a regression
+   (Android Chrome has no `getDisplayMedia` either).
 
-**Plugin choice.** `@codetrix-studio/capacitor-google-auth` was rejected on inspection — its peer
-range is Capacitor 6 and its only recent publish is an RC. `@capgo/capacitor-social-login` (8.3.40)
-targets Capacitor 8, needs no Firebase JS SDK, and its typings confirm it returns a Google `idToken`
-minted against the `webClientId` — which is exactly the audience the backend already verifies.
+## Open questions for the user
 
-## Added beyond the plan
+- **HEIC.** The chat file input advertises `.heic`, but the backend's MIME sniffer accepts only
+  jpeg/png/gif/webp — so a gallery pick of an iPhone photo fails today, on web as well as native.
+  Add HEIC server-side, or drop it from `accept`? Asked several times, not yet answered.
+- **The chevron fix** (`user-settings-dialog.scss`) was a pre-existing defect, not native-only.
+  Worth confirming the web build's settings dialog was showing "chev" too.
 
-- **`isAllowedReleaseUrl` on the announce endpoint.** Every install is told to download and install
-  whatever `apkUrl` an announcement carries, so it is confined to a configured `https` prefix,
-  matched on a parsed URL (host + path on a directory boundary) rather than a string `startsWith`.
-- **`AdminTokenGuard` fails closed.** Unlike VAPID and FCM, which degrade to a silent no-op when
-  unconfigured, an unset `APP_ADMIN_TOKEN` refuses every request: "nobody can announce" is a missing
-  feature, "anyone can broadcast to every install" is an open door.
-- **sha256 verification before install**, with the file deleted on mismatch.
-- **`--notify-reload` works with a `none` bump**, and the deploy workflow pushes that commit — it
-  rewrites the constant and the manifest without bumping, and an unpushed commit would be reverted
-  by the next deploy.
-- **`update.dismiss` was dropped** in favour of the existing `common.dismiss`, rather than shipping
-  a second copy of one word across nine locale files.
+## Still needed before a RELEASE build (none of it code)
 
-## Not verified locally
+Debug builds work today. Release needs:
 
-**Neither native project has been compiled on this machine** — there is no JDK and no Android SDK
-installed here, and no Mac. `AppInstallerPlugin.java`, the Gradle signing config, and every Xcode
-setting are unproven by anything but review.
-
-That gap is why the build check compiles BOTH platforms on every PR touching native paths, rather
-than iOS alone as planned: the Android release workflow is manually dispatched, so a Java error
-would otherwise have surfaced at the moment someone was trying to ship. `npm test` cannot help here
-— the Angular suite runs in jsdom and never sees a line of Java or Swift.
-
-Everything above the native boundary IS verified: 1970 frontend tests, 461 backend, both builds
-clean, and `cap sync` producing a 2.4MB web root (down from ~32MB) with all 8 plugins registered on
-both platforms.
-
-## Still needed before this runs on a device
-
-None of these are code:
-
-1. **Firebase console** — register the Android app, download `google-services.json` into
-   `android/app/`. Push does nothing without it (`build.gradle` logs and carries on).
-2. **Google Cloud console** — an Android OAuth client for `tv.groupspace.converge` with the SHA-1 of
-   *both* the debug and release keystores. Missing the release one is the classic trap: sign-in
-   works in debug and fails only in the shipped APK.
-3. **Release keystore** — generate once, store outside the repo alongside the Firebase key, and set
-   `ANDROID_KEYSTORE_BASE64` / `_PASSWORD` / `_KEY_ALIAS` / `_KEY_PASSWORD`. Losing it means every
-   installed user must uninstall and reinstall.
-4. **GCS bucket** `converge-app-releases`, public-read.
-5. **Backend env** — `APP_ADMIN_TOKEN` and `APP_RELEASE_URL_PREFIX` (both documented in
+1. **Release keystore** — generate once, store outside the repo alongside the Firebase key, and set
+   `ANDROID_KEYSTORE_BASE64` / `_PASSWORD` / `_KEY_ALIAS` / `_KEY_PASSWORD` as GitHub secrets. Its
+   SHA-1 must ALSO be registered as a second Android OAuth client, or sign-in works in debug and
+   fails only in the shipped APK. **Lose this key and no installed user can ever update in place.**
+2. **GCS bucket** `converge-app-releases`, public-read.
+3. **Backend env** — `APP_ADMIN_TOKEN` and `APP_RELEASE_URL_PREFIX` (documented in
    `deploy/.env.example`), plus `APP_ADMIN_TOKEN` and `BACKEND_URL` as GitHub secrets.
-6. **iOS**, when there is a Mac and a paid Apple Developer account: an iOS OAuth client into
+4. **iOS**, when there is a Mac and a paid Apple Developer account: an iOS OAuth client into
    `environment.googleIosClientId`, `GoogleService-Info.plist`, and an APNs auth key.
+
+## Dev environment, as it now stands
+
+Installed during this work, all on the Windows machine:
+
+- **JDK 21** (Temurin) at `C:\Program Files\Eclipse Adoptium\jdk-21.0.12.8-hotspot`, `JAVA_HOME` set.
+- **Android SDK** at `%LOCALAPPDATA%\Android\Sdk` — cmdline-tools, platform-tools, platform 36,
+  build-tools 36. `ANDROID_HOME` set, platform-tools on PATH. No Android Studio.
+- **Debug keystore** at `~/.android/debug.keystore`, SHA-1
+  `5C:AF:FF:C4:C8:8F:3B:F3:D1:4B:25:A8:88:B7:C4:90:35:CE:DF:89`, registered as an Android OAuth
+  client in the `groupspace-tv` Cloud project.
+
+Build and install:
+
+```
+npm run build && npm run cap:sync
+cd android && ./gradlew.bat assembleDebug --no-daemon
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Native builds use the DEFAULT environment (`environment.ts`), so they talk to the GCP dev backend
+over a real Let's Encrypt cert — which sidesteps the unresolved self-signed-CA-on-Android problem
+entirely. Pointing a native build at the LAN backend still needs that cert work.
+
+### Debugging on device — use this, it is much faster than screenshots
+
+The WebView exposes a DevTools socket in debug builds. Reading computed styles off the real device
+is what finally settled the safe-area work, after two wrong fixes derived by reasoning about CSS:
+
+```
+adb shell cat /proc/net/unix | grep webview_devtools_remote     # -> @webview_devtools_remote_<pid>
+adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>
+```
+
+Then `Runtime.evaluate` over the WebSocket listed at `http://127.0.0.1:9222/json`. It also drives
+the UI far more reliably than `adb input tap`, which misses constantly: query the DOM and `.click()`
+instead. Setting an Angular `ngModel` input needs the native value setter plus an `input` event, not
+a plain assignment.
+
+**`adb exec-out screencap -p > file.png` corrupts the PNG through PowerShell.** Use
+`adb shell screencap -p /sdcard/s.png` then `adb pull`.
+
+## Hard-won details worth not rediscovering
+
+- **Capacitor 8's iOS uses Swift Package Manager, not CocoaPods.** No `pod install`, so CI is
+  `xcodebuild -project` with no Ruby toolchain, and iOS stays buildable from Windows.
+- **Never hand a `registerPlugin` proxy to Angular DI.** It answers to EVERY property name, so
+  Angular's `ngOnDestroy` probe resolves to a plugin method it then calls on teardown — an unhandled
+  "not implemented on web" rejection on every injector destroy, in the browser too. Both custom
+  plugins export an explicit facade instead.
+- **`vi.mock` does not work on relative imports** under Angular's unit-test system; it does work on
+  node modules. That is why `APP_INSTALLER` is an InjectionToken.
+- **Firebase's "Add fingerprint" only creates an OAuth client when Firebase Authentication is set
+  up**, and this project does not use it (Converge verifies Google ID tokens itself). The Android
+  OAuth client had to be created directly in the Cloud console. The Management API's
+  `androidApps/*/sha` endpoint registers the fingerprint but does NOT create the client.
+- **Native sign-in must not request scopes.** They buy an access token for Google APIs, and asking
+  on Android routes through `AuthorizationClient`, which needs a MainActivity handler and fails
+  outright without one. The ID token carries `email`/`name`/`picture` regardless.
+- **ColorOS kills a backgrounded app with a fat heap.** Holding a base64 payload across the save
+  picker got the process reaped (`has died: prcp LAST`) and returned to a cold start. Anything that
+  waits on a system UI should stream rather than buffer.
+- **Safe areas: `mat-toolbar` sets `height`, not `min-height`** — padding squeezes its content
+  instead of moving it down. `content-box` on it adds its horizontal padding to the WIDTH.
+  Overriding `min-height` means restating Material's breakpoints, which disagree with this app's
+  `handset` mixin between 600–960px landscape and would change the toolbar's height on the WEB. The
+  answer is a `:host::before` strip, which is zero-height on web by construction.
+- **Padding the CDK overlay CONTAINER does nothing.** The wrapper is absolutely positioned, and the
+  containing block for an absolutely positioned box is the ancestor's padding box — which INCLUDES
+  the padding. Inset the wrapper directly, with a child combinator for specificity.
+- **`viewport-fit=cover` belongs on native only.** It is what makes `env(safe-area-inset-*)` report
+  real values, but it also tells a mobile browser to paint under a cutout. Applied in `main.ts`.
+- **Give `--safe-area-*` plain-zero declarations before the `env()` ones.** A `var()` that resolves
+  to nothing is invalid at computed-value time and takes its whole property with it.
 
 ## Known limitations, accepted
 
-- **Update announcements are English-only.** The other push bodies dodge localization by being pure
-  user content; this one is app prose and the backend has no i18n. Doing it properly means FCM's
-  `titleLocKey` pointing at Android string resources, which would mean duplicating
-  `public/i18n/*.json` into `res/values-*/strings.xml`. The in-app banner says it correctly in the
-  user's own language.
-- **No sender avatar on an OS-drawn notification.** Android's `notification.icon` names a drawable
-  compiled into the APK, not a URL. The foreground path can still render one.
-- **No coalescing on the OS-drawn path.** `push-sw.js` stacks "+2 more" because it can read back its
-  own live notifications; the OS has no such state, so `tag` gives replacement instead.
-- **Screen share is unavailable on native.** Not a regression — Android Chrome has no
-  `getDisplayMedia` either. A real implementation means ReplayKit and MediaProjection.
-- **The storage mirror has a window.** Signing in and losing storage without ever backgrounding the
-  app would still lose the session. Closing it would mean threading a mirror call through `User` and
-  `InvitationGate` for a sequence that needs storage eviction inside one uninterrupted session.
-- **Safe-area insets are applied at the app shell**, so video is inset rather than full-bleed. That
-  is the conservative default and wants a look on a real device.
+- Update announcements are English-only; the in-app banner is localized. Doing it properly means
+  FCM `titleLocKey` pointing at Android string resources, duplicating `public/i18n/*.json`.
+- No sender avatar on an OS-drawn notification — Android's `notification.icon` names a drawable, not
+  a URL. The foreground path can still render one.
+- No coalescing on the OS-drawn path; `tag` gives replacement instead of a "+2 more" stack.
+- The album zip still passes bytes over the bridge (it is built in the browser and has no URL), so
+  it keeps a 25MB ceiling. Attachment downloads have none.
+- The storage mirror has a window: signing in and losing storage without ever backgrounding the app
+  would still lose the session.
