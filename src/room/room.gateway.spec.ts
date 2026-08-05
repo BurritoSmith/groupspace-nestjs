@@ -237,6 +237,53 @@ describe('RoomGateway', () => {
             );
         });
 
+        it('forwards the first image attachment\'s thumbnail/display URLs as the push notification icon/image', () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
+                text: 'check this out',
+                attachments: [
+                    {
+                        id: 'att-1',
+                        kind: 'image',
+                        url: 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo.jpg',
+                        storagePath: 'lobby/2026/07/photo.jpg',
+                        thumbnailUrl: 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo-thumb.jpg',
+                        mimeType: 'image/jpeg',
+                        width: 800,
+                        height: 600,
+                        durationMs: null,
+                        sizeBytes: 12345,
+                        name: 'photo.jpg',
+                    },
+                ],
+            });
+
+            expect(fakePushNotificationService.notifyChatMessage).toHaveBeenCalledWith(
+                'lobby',
+                'user-1',
+                'Clay',
+                'check this out',
+                expect.any(String),
+                expect.any(Set),
+                'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo-thumb.jpg',
+                'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo.jpg',
+            );
+        });
+
+        it('omits icon/image URLs entirely for a text-only message', () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), { text: 'just words' });
+
+            expect(fakePushNotificationService.notifyChatMessage).toHaveBeenCalledWith(
+                'lobby',
+                'user-1',
+                'Clay',
+                'just words',
+                expect.any(String),
+                expect.any(Set),
+                undefined,
+                undefined,
+            );
+        });
+
         it("drops an attachment whose URL doesn't resolve to our own chat-media storage or the Giphy CDN", () => {
             gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), {
                 text: 'look at this',
