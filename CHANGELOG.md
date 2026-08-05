@@ -11,6 +11,12 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.9] - 2026-08-05
+
+### Changed
+
+- Add debug logging to push notification dispatch ([#52](https://github.com/BurritoSmith/groupspace-nestjs/pull/52))
+
 ## [0.27.8] - 2026-08-05
 
 ### Added
@@ -412,7 +418,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.8...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.9...HEAD
+[0.27.9]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.8...v0.27.9
 [0.27.8]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.7...v0.27.8
 [0.27.7]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.6...v0.27.7
 [0.27.6]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.5...v0.27.6
