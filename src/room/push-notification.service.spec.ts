@@ -18,9 +18,16 @@ function createService() {
         listForUser: jest.fn().mockResolvedValue([]),
         deleteById: jest.fn().mockResolvedValue(undefined),
     };
+    const fakeFcmTokens = {
+        register: jest.fn(),
+        unregister: jest.fn(),
+        listForUser: jest.fn().mockResolvedValue([]),
+        deleteById: jest.fn().mockResolvedValue(undefined),
+    };
+    const fakeFcm = { isConfigured: jest.fn().mockReturnValue(false), send: jest.fn().mockResolvedValue('ok') };
     const fakeUserSettings = { save: jest.fn(), getAll: jest.fn().mockResolvedValue([]) };
-    const service = new PushNotificationService(fakeRoomMembership as never, fakePushSubscriptions as never, fakeUserSettings as never);
-    return { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings };
+    const service = new PushNotificationService(fakeRoomMembership as never, fakePushSubscriptions as never, fakeFcmTokens as never, fakeFcm as never, fakeUserSettings as never);
+    return { service, fakeRoomMembership, fakePushSubscriptions, fakeFcmTokens, fakeFcm, fakeUserSettings };
 }
 
 function configure(service: PushNotificationService) {
@@ -166,6 +173,37 @@ describe('PushNotificationService', () => {
             expect(fakePushSubscriptions.deleteById).toHaveBeenCalledWith('sub-1');
         });
 
+        it('also sends to a member\'s registered FCM tokens, alongside their web push subscriptions', async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a' }]);
+            fakeFcmTokens.listForUser.mockResolvedValue([{ id: 'token-row-1', token: 'fcm-token-1' }]);
+
+            await service.notifyChatMessage('lobby', 'user-1', 'Sender', 'hello there', 'msg-1', new Set());
+
+            expect(fakeFcm.send).toHaveBeenCalledWith(
+                'fcm-token-1',
+                expect.objectContaining({ type: 'chat-message', roomName: 'lobby', senderDisplayName: 'Sender', messageText: 'hello there', messageId: 'msg-1' }),
+            );
+        });
+
+        it('deletes an FCM token when FcmService reports it gone', async () => {
+            const { service, fakeRoomMembership, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeFcm.send.mockResolvedValue('gone');
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakeFcmTokens.listForUser.mockResolvedValue([{ id: 'token-row-1', token: 'fcm-token-1' }]);
+
+            await service.notifyChatMessage('lobby', 'user-1', 'Sender', 'hi', 'msg-1', new Set());
+
+            expect(fakeFcmTokens.deleteById).toHaveBeenCalledWith('token-row-1');
+        });
+
         it('skips a member who has focus on the room on any of their devices, even other idle devices of theirs', async () => {
             const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
             configure(service);
@@ -237,6 +275,18 @@ describe('PushNotificationService', () => {
             await service.dismissOtherDevices('user-1', 'device-1');
 
             expect(fakePushSubscriptions.listForUser).not.toHaveBeenCalled();
+        });
+
+        it('also dismisses every FCM-registered device excluding the caller device', async () => {
+            const { service, fakeFcmTokens, fakeFcm } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeFcmTokens.listForUser.mockResolvedValue([{ id: 'token-row-2', token: 'fcm-token-2' }]);
+
+            await service.dismissOtherDevices('user-1', 'device-1');
+
+            expect(fakeFcmTokens.listForUser).toHaveBeenCalledWith('user-1', 'device-1');
+            expect(fakeFcm.send).toHaveBeenCalledWith('fcm-token-2', { type: 'dismiss-all' });
         });
     });
 });

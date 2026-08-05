@@ -25,6 +25,7 @@ model User {
   settings          UserSetting[]
   roomMemberships   RoomMember[]
   pushSubscriptions PushSubscription[]
+  fcmTokens         FcmToken[]
 }
 
 // Generic per-user preference storage — every user setting (starting with the microphone
@@ -98,6 +99,26 @@ model PushSubscription {
   endpoint  String
   p256dh    String
   auth      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, deviceId])
+  @@index([userId])
+}
+
+// One registered FCM token per (userId, deviceId) — a separate table from PushSubscription rather
+// than an overload of it, since the shapes don't overlap (a single opaque token vs. an
+// endpoint/p256dh/auth triplet). Same deviceId convention, so dismissOtherDevices' "which device is
+// active" logic works the same way across both tables. Nothing writes to this yet: it exists ahead
+// of a Capacitor mobile app (Android push is FCM-only) and an Electron path that turned out not to
+// need it — see push-notification.service.ts.
+model FcmToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  deviceId  String
+  token     String
+  platform  String // 'android' | 'ios' once a mobile app exists to set them
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
