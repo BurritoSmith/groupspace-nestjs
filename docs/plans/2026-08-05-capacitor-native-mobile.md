@@ -434,6 +434,21 @@ minted against the `webClientId` — which is exactly the audience the backend a
 - **`update.dismiss` was dropped** in favour of the existing `common.dismiss`, rather than shipping
   a second copy of one word across nine locale files.
 
+## Not verified locally
+
+**Neither native project has been compiled on this machine** — there is no JDK and no Android SDK
+installed here, and no Mac. `AppInstallerPlugin.java`, the Gradle signing config, and every Xcode
+setting are unproven by anything but review.
+
+That gap is why the build check compiles BOTH platforms on every PR touching native paths, rather
+than iOS alone as planned: the Android release workflow is manually dispatched, so a Java error
+would otherwise have surfaced at the moment someone was trying to ship. `npm test` cannot help here
+— the Angular suite runs in jsdom and never sees a line of Java or Swift.
+
+Everything above the native boundary IS verified: 1970 frontend tests, 461 backend, both builds
+clean, and `cap sync` producing a 2.4MB web root (down from ~32MB) with all 8 plugins registered on
+both platforms.
+
 ## Still needed before this runs on a device
 
 None of these are code:
