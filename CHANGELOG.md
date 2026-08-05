@@ -11,6 +11,12 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.10] - 2026-08-05
+
+### Added
+
+- Attach image/gif thumbnails to chat message push notifications ([#53](https://github.com/BurritoSmith/groupspace-nestjs/pull/53))
+
 ## [0.27.9] - 2026-08-05
 
 ### Changed
@@ -418,7 +424,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.9...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.10...HEAD
+[0.27.10]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.9...v0.27.10
 [0.27.9]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.8...v0.27.9
 [0.27.8]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.7...v0.27.8
 [0.27.7]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.6...v0.27.7
