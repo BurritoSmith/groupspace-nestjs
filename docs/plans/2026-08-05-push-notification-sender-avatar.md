@@ -21,9 +21,16 @@ this morning's testing:
 
 ## Part 1 — Sender avatar in the icon slot (the actual change)
 
-Chosen behaviour: **an attachment thumbnail still wins the icon slot when the message has one;
-the sender's avatar fills it otherwise.** No change to the `image` (large expanded picture) slot,
-so nothing regresses on the Electron/Windows toast path that was only just made to work.
+Final behaviour: **the sender's avatar always wins the icon slot; the attachment thumbnail stays
+only as a fallback for an account with no picture.** No change to the `image` (large expanded
+picture) slot.
+
+This was first shipped the other way round — thumbnail first, avatar only as a fallback — and
+revised immediately on seeing it live: for a message with an attachment, the icon showed the same
+picture already rendered full width by `image` directly beneath it, shrunk into a corner. The two
+slots answer different questions (`icon` = who sent it, `image` = what they sent), and duplicating
+the attachment across both told the reader nothing while dropping the only cue about who it was
+from.
 
 `User.pictureUrl` is a Google account picture (absolute `https://lh3.googleusercontent.com/...`),
 already loaded everywhere it is needed — no new query, no new table.
@@ -52,7 +59,7 @@ already loaded everywhere it is needed — no new query, no new table.
     Google URL passes through untouched, and it future-proofs a self-hosted avatar.
   - Also set it for the `peer-joined` branch, which today passes no icon at all.
 - **`src/app/room/services/chat.ts`** — `notifyDesktop()` gains an `avatarUrl` parameter and
-  resolves `iconUrl → avatarUrl → Chat.DEFAULT_NOTIFICATION_ICON`. Use `||`-style falsiness, not
+  resolves `avatarUrl → iconUrl → Chat.DEFAULT_NOTIFICATION_ICON`. Use `||`-style falsiness, not
   `??`: `pictureUrl` is `''` (not `undefined`) for an account with no Google picture, and `??`
   would let the empty string win. Both call sites already have the value in hand —
   `message.pictureUrl` on `'chat-message'`, and `pictureUrl` from the destructured `PeerSummary`
@@ -63,7 +70,8 @@ already loaded everywhere it is needed — no new query, no new table.
 - `push-notification.service.spec.ts` — payload carries `senderPictureUrl`/`joinerPictureUrl` when
   present and omits the key entirely when the user has no picture.
 - `chat.spec.ts` — extend the existing "Chat — desktop notifications" block: avatar used when
-  there is no attachment thumbnail; thumbnail still wins when there is one; app icon when neither.
+  there is no attachment thumbnail; avatar still wins when there is one; thumbnail as the fallback
+  for a sender with no picture; app icon when neither.
 - `push-sw.js` has **no test harness** (it is plain JS served from `public/`, deliberately outside
   the Angular build) — it stays manually verified, as today.
 
@@ -107,9 +115,10 @@ From `docker compose logs app --since=12h` on `spaces-vm`, room `hunch`, 4 membe
    `ng build`.
 2. Deploy to GCP dev, then on the Android device confirm: a plain-text message now shows the
    sender's Google avatar where the "D" placeholder was; a message with an image attachment still
-   shows the attachment thumbnail as the icon and the large picture below; a "joined the room"
+   still shows the sender's avatar as the icon, with the attachment full width below; a "joined the room"
    notification now shows the joiner's avatar.
-3. On the Electron desktop app, confirm the same precedence and that the attachment thumbnail
-   behaviour is unchanged from today.
+3. On the Electron desktop app, confirm the same precedence, and specifically that the attachment
+   is still visible via the `image` slot now that it no longer occupies `icon` — Windows toasts
+   render a hero image, but that path had only ever been exercised through `icon` before this.
 4. Confirm an account with no Google picture still gets the Converge icon rather than a broken
    image.
