@@ -64,6 +64,7 @@ export class PushNotificationService implements OnModuleInit {
         focusedUserIds: ReadonlySet<string>,
         iconUrl?: string,
         imageUrl?: string,
+        senderPictureUrl?: string,
     ): Promise<void> {
         const payload: PushPayload = {
             type: 'chat-message',
@@ -74,12 +75,28 @@ export class PushNotificationService implements OnModuleInit {
             tag: chatMessageTag(roomName),
             ...(iconUrl ? { iconUrl } : {}),
             ...(imageUrl ? { imageUrl } : {}),
+            // Guarded rather than always spread: pictureUrl is '' (not undefined) for an account
+            // Google gave no picture for, and shipping an empty string would have the client set
+            // an icon it can never load instead of falling back to the app's own.
+            ...(senderPictureUrl ? { senderPictureUrl } : {}),
         };
         await this.notifyRoomMembers(roomName, actorUserId, NOTIFICATIONS_NEW_MESSAGE_KEY, payload, focusedUserIds);
     }
 
-    async notifyPeerJoined(roomName: string, actorUserId: string, joinerDisplayName: string, focusedUserIds: ReadonlySet<string>): Promise<void> {
-        const payload: PushPayload = { type: 'peer-joined', roomName, joinerDisplayName, tag: peerJoinedTag(roomName) };
+    async notifyPeerJoined(
+        roomName: string,
+        actorUserId: string,
+        joinerDisplayName: string,
+        focusedUserIds: ReadonlySet<string>,
+        joinerPictureUrl?: string,
+    ): Promise<void> {
+        const payload: PushPayload = {
+            type: 'peer-joined',
+            roomName,
+            joinerDisplayName,
+            tag: peerJoinedTag(roomName),
+            ...(joinerPictureUrl ? { joinerPictureUrl } : {}),
+        };
         await this.notifyRoomMembers(roomName, actorUserId, NOTIFICATIONS_PERSON_JOINED_KEY, payload, focusedUserIds);
     }
 

@@ -234,7 +234,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         socket.data.pictureUrl = pictureUrl;
         socket.to(roomName).emit('peer-joined', { peerId: socket.id, userId, displayName, pictureUrl, micSelfMuted: false });
         void this.roomMembershipService.recordVisit(userId, roomName);
-        void this.pushNotificationService.notifyPeerJoined(roomName, userId, displayName, this.roomService.getFocusedUserIds(roomName));
+        void this.pushNotificationService.notifyPeerJoined(roomName, userId, displayName, this.roomService.getFocusedUserIds(roomName), pictureUrl);
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
         const userSettings = await this.userSettingsService.getAll(userId);
@@ -475,6 +475,7 @@ export class RoomGateway implements OnGatewayDisconnect {
             firstMediaAttachment
                 ? (firstMediaAttachment.albumCoverUrl ?? firstMediaAttachment.displayUrl ?? firstMediaAttachment.url)
                 : undefined,
+            message.pictureUrl,
         );
         this.chatService.saveMessage(
             message.id,

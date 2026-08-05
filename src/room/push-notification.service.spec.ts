@@ -146,6 +146,45 @@ describe('PushNotificationService', () => {
             expect(sentPayload).not.toHaveProperty('imageUrl');
         });
 
+        it("includes the sender's picture so a text-only message still has an icon to show", async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
+            configure(service);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a' }]);
+
+            await service.notifyChatMessage(
+                'lobby',
+                'user-1',
+                'Sender',
+                'just text',
+                'msg-1',
+                new Set(),
+                undefined,
+                undefined,
+                'https://lh3.googleusercontent.com/avatar',
+            );
+
+            const sentPayload = JSON.parse((webpush.sendNotification as jest.Mock).mock.calls[0][1] as string);
+            expect(sentPayload.senderPictureUrl).toBe('https://lh3.googleusercontent.com/avatar');
+        });
+
+        // '' rather than undefined is what an account Google gave no picture for actually carries,
+        // and shipping it would have the client set an icon it can never load rather than falling
+        // back to the app's own mark.
+        it('omits senderPictureUrl for an account with no picture', async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
+            configure(service);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a' }]);
+
+            await service.notifyChatMessage('lobby', 'user-1', 'Sender', 'just text', 'msg-1', new Set(), undefined, undefined, '');
+
+            const sentPayload = JSON.parse((webpush.sendNotification as jest.Mock).mock.calls[0][1] as string);
+            expect(sentPayload).not.toHaveProperty('senderPictureUrl');
+        });
+
         it('truncates long message text before sending', async () => {
             const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
             configure(service);
@@ -251,6 +290,24 @@ describe('PushNotificationService', () => {
                 { endpoint: 'https://push.example/a', keys: { p256dh: 'p', auth: 'a' } },
                 JSON.stringify({ type: 'peer-joined', roomName: 'lobby', joinerDisplayName: 'Joiner', tag: 'peer-joined:lobby' }),
             );
+        });
+
+        // This notification never has an attachment of its own, so the avatar is the only icon it
+        // will ever carry — without it Chrome falls back to a letter placeholder from the origin.
+        it("includes the joiner's picture when they have one", async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
+            configure(service);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([
+                { userId: 'user-1', displayName: 'Joiner', pictureUrl: '' },
+                { userId: 'user-2', displayName: 'Existing', pictureUrl: '' },
+            ]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a' }]);
+
+            await service.notifyPeerJoined('lobby', 'user-1', 'Joiner', new Set(), 'https://lh3.googleusercontent.com/avatar');
+
+            const sentPayload = JSON.parse((webpush.sendNotification as jest.Mock).mock.calls[0][1] as string);
+            expect(sentPayload.joinerPictureUrl).toBe('https://lh3.googleusercontent.com/avatar');
         });
     });
 

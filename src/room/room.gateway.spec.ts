@@ -198,6 +198,26 @@ describe('RoomGateway', () => {
             );
         });
 
+        // The push payload's icon fallback for a message with no attachment thumbnail — without it
+        // Chrome for Android draws its own letter placeholder from the origin instead.
+        it("forwards the sender's pictureUrl to the push notification", () => {
+            gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay', pictureUrl: 'https://pic' }), {
+                text: 'hello',
+            });
+
+            expect(fakePushNotificationService.notifyChatMessage).toHaveBeenCalledWith(
+                'lobby',
+                'user-1',
+                'Clay',
+                'hello',
+                expect.any(String),
+                expect.any(Set),
+                undefined,
+                undefined,
+                'https://pic',
+            );
+        });
+
         it('falls back to an empty string when socket.data has no pictureUrl', () => {
             gateway.onChatMessage(fakeSocket({ roomName: 'lobby', userId: 'user-1', displayName: 'Clay' }), { text: 'hello' });
 
@@ -266,6 +286,7 @@ describe('RoomGateway', () => {
                 expect.any(Set),
                 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo-thumb.jpg',
                 'https://storage.googleapis.com/test-chat-media-bucket/lobby/2026/07/photo.jpg',
+                expect.any(String),
             );
         });
 
@@ -281,6 +302,7 @@ describe('RoomGateway', () => {
                 expect.any(Set),
                 undefined,
                 undefined,
+                expect.any(String),
             );
         });
 
