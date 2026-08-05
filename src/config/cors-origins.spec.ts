@@ -24,6 +24,17 @@ describe('getAllowedOrigins', () => {
         expect(getAllowedOrigins()).toContain('http://localhost:41730');
     });
 
+    // A phone that reaches the LAN dev server via a bookmark/history entry (rather than typing the
+    // sslip.io hostname fresh each time) sends the raw IP as its Origin — both forms have to be
+    // allowed or every REST call from that tab (Push, chat media, settings) silently fails CORS
+    // even though sign-in and the socket connection both still work.
+    it('allows both the raw LAN IP and its sslip.io form over https', () => {
+        const origins = getAllowedOrigins();
+
+        expect(origins).toContain('https://192.168.1.222:4200');
+        expect(origins).toContain('https://192-168-1-222.sslip.io:4200');
+    });
+
     it('appends FRONTEND_ORIGIN entries, trimmed, without dropping the built-ins', () => {
         process.env.FRONTEND_ORIGIN = 'https://one.example , https://two.example';
 

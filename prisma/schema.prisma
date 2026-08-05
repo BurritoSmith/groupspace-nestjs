@@ -19,10 +19,12 @@ model User {
   // (UsersService.upsertFromGoogleProfile never touches it on an update), so it's a permanent
   // record of how someone originally got in, not something a later re-invite would overwrite.
 
-  chatMessages  ChatMessage[]
-  chatReactions ChatMessageReaction[]
-  recordings    Recording[]
-  settings      UserSetting[]
+  chatMessages      ChatMessage[]
+  chatReactions     ChatMessageReaction[]
+  recordings        Recording[]
+  settings          UserSetting[]
+  roomMemberships   RoomMember[]
+  pushSubscriptions PushSubscription[]
 }
 
 // Generic per-user preference storage — every user setting (starting with the microphone
@@ -60,6 +62,47 @@ model Room {
   chatMessages      ChatMessage[]
   recordings        Recording[]
   recordingSessions RecordingSession[]
+  members           RoomMember[]
+}
+
+// Scaffolding for a lightweight, permission-free "has this user ever been in this room" concept —
+// seeded for pre-existing rooms by backfilling distinct (userId, roomName) pairs out of ChatMessage
+// history (see the migration SQL). Drives two things for now: the join-room screen's "rooms you've
+// visited before" typeahead, and push-notification eligibility (RecordingService/PushNotification
+// only ever notify a room's members, never a stranger who's never been in it). Deliberately no
+// permissions/roles here yet — just enough structure to build that on top of later without another
+// migration.
+model RoomMember {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  roomName      String
+  room          Room     @relation(fields: [roomName], references: [name])
+  firstJoinedAt DateTime @default(now())
+  lastJoinedAt  DateTime @updatedAt
+
+  @@unique([userId, roomName])
+  @@index([userId])
+  @@index([roomName])
+}
+
+// One registered Web Push endpoint for one browser/device install. `deviceId` is client-minted
+// (crypto.randomUUID(), persisted in localStorage) rather than derived from the endpoint itself,
+// so re-subscribing the same install (e.g. after the push service rotates its endpoint under the
+// hood) upserts in place instead of accumulating duplicate rows.
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  deviceId  String
+  endpoint  String
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, deviceId])
+  @@index([userId])
 }
 
 // Groups every stream (webcam/screen/audio-mix) produced by one "start recording" ->

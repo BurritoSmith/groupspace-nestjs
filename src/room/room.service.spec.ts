@@ -27,6 +27,7 @@ describe('RoomService', () => {
                 displayName: 'Clay',
                 pictureUrl: '',
                 micSelfMuted: false,
+                focused: true,
                 roomName,
                 router: {} as never,
                 sendTransport: null,
@@ -63,6 +64,59 @@ describe('RoomService', () => {
         });
     });
 
+    describe('setPeerFocus / getFocusedUserIds', () => {
+        function seedPeer(peerId: string, userId: string, roomName: string, focused = true): void {
+            const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
+            peers.set(peerId, {
+                peerId,
+                userId,
+                displayName: 'Clay',
+                pictureUrl: '',
+                micSelfMuted: false,
+                focused,
+                roomName,
+                router: {} as never,
+                sendTransport: null,
+                recvTransport: null,
+                producers: new Map(),
+                consumers: new Map(),
+            });
+        }
+
+        it('flips a peer\'s focused flag', () => {
+            seedPeer('peer-1', 'user-1', 'lobby', true);
+
+            service.setPeerFocus('peer-1', false);
+
+            const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
+            expect(peers.get('peer-1')?.focused).toBe(false);
+        });
+
+        it('does nothing when the peer is unknown, rather than throwing', () => {
+            expect(() => service.setPeerFocus('nonexistent-peer', true)).not.toThrow();
+        });
+
+        it('returns the userIds of every focused peer in the room', () => {
+            seedPeer('peer-1', 'user-1', 'lobby', true);
+            seedPeer('peer-2', 'user-2', 'lobby', false);
+
+            expect(service.getFocusedUserIds('lobby')).toEqual(new Set(['user-1']));
+        });
+
+        it('counts a user as focused if ANY of their devices/peers in the room is', () => {
+            seedPeer('peer-1', 'user-1', 'lobby', false);
+            seedPeer('peer-2', 'user-1', 'lobby', true);
+
+            expect(service.getFocusedUserIds('lobby')).toEqual(new Set(['user-1']));
+        });
+
+        it('ignores peers in a different room', () => {
+            seedPeer('peer-1', 'user-1', 'other-room', true);
+
+            expect(service.getFocusedUserIds('lobby')).toEqual(new Set());
+        });
+    });
+
     describe('consume', () => {
         function seedConsumingPeer(consumeMock: jest.Mock): void {
             const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
@@ -72,6 +126,7 @@ describe('RoomService', () => {
                 displayName: 'Viewer',
                 pictureUrl: '',
                 micSelfMuted: false,
+                focused: true,
                 roomName: 'lobby',
                 router: { canConsume: () => true } as never,
                 sendTransport: null,
@@ -114,6 +169,7 @@ describe('RoomService', () => {
                 displayName: 'Viewer',
                 pictureUrl: '',
                 micSelfMuted: false,
+                focused: true,
                 roomName: 'lobby',
                 router: {} as never,
                 sendTransport: null,
@@ -134,6 +190,7 @@ describe('RoomService', () => {
                 displayName: 'Publisher',
                 pictureUrl: '',
                 micSelfMuted: false,
+                focused: true,
                 roomName: 'lobby',
                 router: {} as never,
                 sendTransport: null,

@@ -124,7 +124,7 @@ export class RoomService implements OnModuleInit {
         userId: string,
         displayName: string,
         pictureUrl: string,
-    ): Promise<Omit<IJoinRoomResult, 'iceServers' | 'userId' | 'chatHistory' | 'hasMoreChatHistory' | 'userSettings'>> {
+    ): Promise<Omit<IJoinRoomResult, 'iceServers' | 'userId' | 'chatHistory' | 'hasMoreChatHistory' | 'userSettings' | 'roomMembers'>> {
         const router = await this.getOrCreateRouter(roomName);
         const peers: IPeerSummary[] = [];
         const existingProducers: IProducerSummary[] = [];
@@ -158,6 +158,7 @@ export class RoomService implements OnModuleInit {
             displayName,
             pictureUrl,
             micSelfMuted: false,
+            focused: true, // a fresh join is assumed to mean "looking at it right now" until told otherwise
             roomName,
             router,
             sendTransport: null,
@@ -186,6 +187,29 @@ export class RoomService implements OnModuleInit {
         }
         peer.micSelfMuted = muted;
         return { roomName: peer.roomName };
+    }
+
+    /** Records whether one device currently has the room's tab visible/focused — see
+     *  IPeerState.focused. No broadcast: unlike micSelfMuted, nothing live needs to react to this,
+     *  it's purely read back by getFocusedUserIds() when deciding whether to push a notification. */
+    setPeerFocus(peerId: string, focused: boolean): void {
+        const peer = this.peers.get(peerId);
+        if (peer) {
+            peer.focused = focused;
+        }
+    }
+
+    /** Every userId with at least one device currently focused on this room — PushNotificationService
+     *  uses this to skip notifying someone who's already looking at the room live, on ANY of their
+     *  devices (the same person can have several peers here, one per open tab/device). */
+    getFocusedUserIds(roomName: string): Set<string> {
+        const userIds = new Set<string>();
+        for (const peer of this.peers.values()) {
+            if (peer.roomName === roomName && peer.focused) {
+                userIds.add(peer.userId);
+            }
+        }
+        return userIds;
     }
 
     async createTransport(peerId: string, direction: 'send' | 'recv') {

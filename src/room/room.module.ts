@@ -11,9 +11,14 @@ import { InvitationsController } from './invitations.controller';
 import { InvitationsService } from './invitations.service';
 import { LinkPreviewService } from './link-preview.service';
 import { PdfThumbnailService } from './pdf-thumbnail.service';
+import { PushNotificationService } from './push-notification.service';
+import { PushSubscriptionController } from './push-subscription.controller';
+import { PushSubscriptionService } from './push-subscription.service';
 import { RecordingService } from './recording.service';
 import { RoomGateway } from './room.gateway';
+import { RoomMembershipService } from './room-membership.service';
 import { RoomService } from './room.service';
+import { RoomsController } from './rooms.controller';
 import { SessionAuthGuard } from './session-auth.guard';
 import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
@@ -40,7 +45,7 @@ import { VideoThumbnailService } from './video-thumbnail.service';
             },
         }),
     ],
-    controllers: [ChatMediaController, GifsController, InvitationsController, UserSettingsController],
+    controllers: [ChatMediaController, GifsController, InvitationsController, UserSettingsController, RoomsController, PushSubscriptionController],
     providers: [
         RoomGateway,
         RoomService,
@@ -59,6 +64,9 @@ import { VideoThumbnailService } from './video-thumbnail.service';
         GiphyService,
         SessionAuthGuard,
         InvitationsService,
+        RoomMembershipService,
+        PushSubscriptionService,
+        PushNotificationService,
     ],
 })
 export class RoomModule {}

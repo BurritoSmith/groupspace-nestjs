@@ -19,7 +19,9 @@ import { ChatMediaService } from './chat-media.service';
 import { ChatService, HISTORY_PAGE_SIZE } from './chat.service';
 import { GoogleAuthService } from './google-auth.service';
 import { LinkPreviewService, extractFirstUrl } from './link-preview.service';
+import { PushNotificationService } from './push-notification.service';
 import { RecordingService } from './recording.service';
+import { RoomMembershipService } from './room-membership.service';
 import { RoomService } from './room.service';
 import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
@@ -41,6 +43,7 @@ import type {
     IResumeProducerPayload,
     ISaveUserSettingPayload,
     ISetConsumerQualityPayload,
+    ISetFocusPayload,
 } from './interfaces/room.interfaces';
 
 @WebSocketGateway({
@@ -69,6 +72,8 @@ export class RoomGateway implements OnGatewayDisconnect {
         private readonly chatMediaService: ChatMediaService,
         private readonly linkPreviewService: LinkPreviewService,
         private readonly chatReactionService: ChatReactionService,
+        private readonly roomMembershipService: RoomMembershipService,
+        private readonly pushNotificationService: PushNotificationService,
     ) {
         this.roomService.events.on('active-speakers', ({ roomName, peerIds }: { roomName: string; peerIds: string[] }) => {
             this.server.to(roomName).emit('active-speakers', { peerIds });
@@ -228,9 +233,12 @@ export class RoomGateway implements OnGatewayDisconnect {
         socket.data.userId = userId;
         socket.data.pictureUrl = pictureUrl;
         socket.to(roomName).emit('peer-joined', { peerId: socket.id, userId, displayName, pictureUrl, micSelfMuted: false });
+        void this.roomMembershipService.recordVisit(userId, roomName);
+        void this.pushNotificationService.notifyPeerJoined(roomName, userId, displayName, this.roomService.getFocusedUserIds(roomName));
         const turnCredentials = this.turnCredentialsService.generateFor(socket.id);
         const chatHistory = await this.chatService.getRecentHistory(roomName);
         const userSettings = await this.userSettingsService.getAll(userId);
+        const roomMembers = await this.roomMembershipService.listMembersWithProfile(roomName);
         return {
             ...result,
             userId,
@@ -238,6 +246,7 @@ export class RoomGateway implements OnGatewayDisconnect {
             chatHistory,
             hasMoreChatHistory: chatHistory.length === HISTORY_PAGE_SIZE,
             iceServers: turnCredentials ? [turnCredentials] : [],
+            roomMembers,
             userSettings,
         };
     }
@@ -452,6 +461,14 @@ export class RoomGateway implements OnGatewayDisconnect {
             ...(attachments.length > 0 ? { attachments } : {}),
         };
         this.server.to(roomName).emit('chat-message', message);
+        void this.pushNotificationService.notifyChatMessage(
+            roomName,
+            userId,
+            message.displayName,
+            message.text || (attachments.length > 0 ? 'Sent an attachment' : ''),
+            message.id,
+            this.roomService.getFocusedUserIds(roomName),
+        );
         this.chatService.saveMessage(
             message.id,
             roomName,
@@ -629,6 +646,14 @@ export class RoomGateway implements OnGatewayDisconnect {
             return;
         }
         socket.to(result.roomName).emit('mic-mute-changed', { peerId: socket.id, muted: payload.muted });
+    }
+
+    /** No broadcast, unlike mic-mute-changed above — nothing live needs to react to this, it's
+     *  purely bookkeeping PushNotificationService reads back via RoomService.getFocusedUserIds
+     *  to skip notifying someone who's already looking at the room live on some device. */
+    @SubscribeMessage('set-focus')
+    onSetFocus(@ConnectedSocket() socket: Socket, @MessageBody() payload: ISetFocusPayload) {
+        this.roomService.setPeerFocus(socket.id, payload.focused);
     }
 
     /** Generic per-user setting save — one handler for every settings key (starting with the
