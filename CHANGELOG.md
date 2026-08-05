@@ -11,6 +11,12 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.12] - 2026-08-05
+
+### Added
+
+- Send the sender's avatar so a text-only notification has an icon ([#55](https://github.com/BurritoSmith/groupspace-nestjs/pull/55))
+
 ## [0.27.11] - 2026-08-05
 
 ### Added
@@ -430,7 +436,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.11...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.12...HEAD
+[0.27.12]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.11...v0.27.12
 [0.27.11]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.10...v0.27.11
 [0.27.10]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.9...v0.27.10
 [0.27.9]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.8...v0.27.9
