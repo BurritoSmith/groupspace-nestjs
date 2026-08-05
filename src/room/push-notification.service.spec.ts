@@ -102,6 +102,43 @@ describe('PushNotificationService', () => {
             );
         });
 
+        it('includes iconUrl/imageUrl in the payload when given, and omits them when absent', async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
+            configure(service);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a' }]);
+
+            await service.notifyChatMessage(
+                'lobby',
+                'user-1',
+                'Sender',
+                'look at this',
+                'msg-1',
+                new Set(),
+                'https://cdn.example/thumb.jpg',
+                'https://cdn.example/full.jpg',
+            );
+
+            const sentPayload = JSON.parse((webpush.sendNotification as jest.Mock).mock.calls[0][1] as string);
+            expect(sentPayload.iconUrl).toBe('https://cdn.example/thumb.jpg');
+            expect(sentPayload.imageUrl).toBe('https://cdn.example/full.jpg');
+        });
+
+        it('omits iconUrl/imageUrl entirely from the payload for a text-only message', async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
+            configure(service);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a' }]);
+
+            await service.notifyChatMessage('lobby', 'user-1', 'Sender', 'just text', 'msg-1', new Set());
+
+            const sentPayload = JSON.parse((webpush.sendNotification as jest.Mock).mock.calls[0][1] as string);
+            expect(sentPayload).not.toHaveProperty('iconUrl');
+            expect(sentPayload).not.toHaveProperty('imageUrl');
+        });
+
         it('truncates long message text before sending', async () => {
             const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
             configure(service);

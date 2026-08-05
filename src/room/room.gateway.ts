@@ -461,6 +461,9 @@ export class RoomGateway implements OnGatewayDisconnect {
             ...(attachments.length > 0 ? { attachments } : {}),
         };
         this.server.to(roomName).emit('chat-message', message);
+        // Only image/gif — a video's poster is generated asynchronously after this point (see
+        // ensureVideoPosters below), so it's never ready in time to attach to this notification.
+        const firstMediaAttachment = attachments.find((attachment) => attachment.kind === 'image' || attachment.kind === 'gif');
         void this.pushNotificationService.notifyChatMessage(
             roomName,
             userId,
@@ -468,6 +471,10 @@ export class RoomGateway implements OnGatewayDisconnect {
             message.text || (attachments.length > 0 ? 'Sent an attachment' : ''),
             message.id,
             this.roomService.getFocusedUserIds(roomName),
+            firstMediaAttachment ? (firstMediaAttachment.thumbnailUrl ?? firstMediaAttachment.albumCoverUrl ?? undefined) : undefined,
+            firstMediaAttachment
+                ? (firstMediaAttachment.albumCoverUrl ?? firstMediaAttachment.displayUrl ?? firstMediaAttachment.url)
+                : undefined,
         );
         this.chatService.saveMessage(
             message.id,

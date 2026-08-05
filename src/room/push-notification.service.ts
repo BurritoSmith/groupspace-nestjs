@@ -58,6 +58,8 @@ export class PushNotificationService implements OnModuleInit {
         messageText: string,
         messageId: string,
         focusedUserIds: ReadonlySet<string>,
+        iconUrl?: string,
+        imageUrl?: string,
     ): Promise<void> {
         const payload: PushPayload = {
             type: 'chat-message',
@@ -66,6 +68,8 @@ export class PushNotificationService implements OnModuleInit {
             messageText: messageText.slice(0, MAX_MESSAGE_TEXT_LENGTH),
             messageId,
             tag: chatMessageTag(roomName),
+            ...(iconUrl ? { iconUrl } : {}),
+            ...(imageUrl ? { imageUrl } : {}),
         };
         await this.notifyRoomMembers(roomName, actorUserId, NOTIFICATIONS_NEW_MESSAGE_KEY, payload, focusedUserIds);
     }
