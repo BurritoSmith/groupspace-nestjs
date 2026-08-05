@@ -4,6 +4,9 @@ import { ChatMediaController } from './chat-media.controller';
 import { ChatMediaService } from './chat-media.service';
 import { ChatReactionService } from './chat-reaction.service';
 import { ChatService } from './chat.service';
+import { FcmService } from './fcm.service';
+import { FcmTokenController } from './fcm-token.controller';
+import { FcmTokenService } from './fcm-token.service';
 import { GifsController } from './gifs.controller';
 import { GiphyService } from './giphy.service';
 import { GoogleAuthService } from './google-auth.service';
@@ -45,7 +48,7 @@ import { VideoThumbnailService } from './video-thumbnail.service';
             },
         }),
     ],
-    controllers: [ChatMediaController, GifsController, InvitationsController, UserSettingsController, RoomsController, PushSubscriptionController],
+    controllers: [ChatMediaController, GifsController, InvitationsController, UserSettingsController, RoomsController, PushSubscriptionController, FcmTokenController],
     providers: [
         RoomGateway,
         RoomService,
@@ -66,6 +69,8 @@ import { VideoThumbnailService } from './video-thumbnail.service';
         InvitationsService,
         RoomMembershipService,
         PushSubscriptionService,
+        FcmTokenService,
+        FcmService,
         PushNotificationService,
     ],
 })

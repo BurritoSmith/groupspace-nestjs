@@ -34,6 +34,7 @@
     "@nestjs/websockets": "^11.1.28",
     "@prisma/client": "^6.19.3",
     "dotenv": "^17.4.2",
+    "firebase-admin": "^14.2.0",
     "google-auth-library": "^10.9.1",
     "mediasoup": "^3.22.0",
     "pdfjs-dist": "^6.2.108",

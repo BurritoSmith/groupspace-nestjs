@@ -2,6 +2,8 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as webpush from 'web-push';
 import { RoomMembershipService } from './room-membership.service';
 import { PushSubscriptionService, IPushSubscriptionRow } from './push-subscription.service';
+import { FcmTokenService, IFcmTokenRow } from './fcm-token.service';
+import { FcmService } from './fcm.service';
 import { UserSettingsService } from './user-settings.service';
 import { PushPayload, chatMessageTag, peerJoinedTag } from './push-payload.interface';
 
@@ -34,6 +36,8 @@ export class PushNotificationService implements OnModuleInit {
     constructor(
         private readonly roomMembership: RoomMembershipService,
         private readonly pushSubscriptions: PushSubscriptionService,
+        private readonly fcmTokens: FcmTokenService,
+        private readonly fcm: FcmService,
         private readonly userSettings: UserSettingsService,
     ) {}
 
@@ -80,11 +84,12 @@ export class PushNotificationService implements OnModuleInit {
     }
 
     async dismissOtherDevices(userId: string, callerDeviceId: string): Promise<void> {
-        if (!this.configured || !userId) {
+        if ((!this.configured && !this.fcm.isConfigured()) || !userId) {
             return;
         }
         const subscriptions = await this.pushSubscriptions.listForUser(userId, callerDeviceId);
-        await Promise.all(subscriptions.map((sub) => this.send(sub, { type: 'dismiss-all' })));
+        const tokens = await this.fcmTokens.listForUser(userId, callerDeviceId);
+        await Promise.all([...subscriptions.map((sub) => this.send(sub, { type: 'dismiss-all' })), ...tokens.map((tok) => this.sendFcm(tok, { type: 'dismiss-all' }))]);
     }
 
     /** `focusedUserIds` — every user with at least one device currently looking at this room live
@@ -98,7 +103,7 @@ export class PushNotificationService implements OnModuleInit {
         payload: PushPayload,
         focusedUserIds: ReadonlySet<string>,
     ): Promise<void> {
-        if (!this.configured) {
+        if (!this.configured && !this.fcm.isConfigured()) {
             return;
         }
         const members = await this.roomMembership.listMembersWithProfile(roomName);
@@ -114,8 +119,9 @@ export class PushNotificationService implements OnModuleInit {
                     return;
                 }
                 const subscriptions = await this.pushSubscriptions.listForUser(member.userId);
-                this.logger.debug(`sending to ${member.userId}: ${subscriptions.length} subscription(s)`);
-                await Promise.all(subscriptions.map((sub) => this.send(sub, payload)));
+                const tokens = await this.fcmTokens.listForUser(member.userId);
+                this.logger.debug(`sending to ${member.userId}: ${subscriptions.length} subscription(s), ${tokens.length} FCM token(s)`);
+                await Promise.all([...subscriptions.map((sub) => this.send(sub, payload)), ...tokens.map((tok) => this.sendFcm(tok, payload))]);
             }),
         );
     }
@@ -140,6 +146,14 @@ export class PushNotificationService implements OnModuleInit {
             } else {
                 this.logger.warn(`Push send failed (${statusCode ?? 'unknown'}) for subscription ${subscription.id}: ${error instanceof Error ? error.message : String(error)}`);
             }
+        }
+    }
+
+    private async sendFcm(token: IFcmTokenRow, payload: PushPayload): Promise<void> {
+        const result = await this.fcm.send(token.token, payload);
+        if (result === 'gone') {
+            this.logger.debug(`FCM token ${token.id} gone — deleting`);
+            await this.fcmTokens.deleteById(token.id);
         }
     }
 }
