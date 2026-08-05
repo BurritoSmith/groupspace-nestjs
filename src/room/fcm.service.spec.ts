@@ -76,7 +76,7 @@ describe('FcmService', () => {
             expect(sendMock).not.toHaveBeenCalled();
         });
 
-        it('sends a data-only message with the payload JSON-stringified', async () => {
+        it('always carries the raw payload as data, so the tap handler has the full typed shape', async () => {
             const service = new FcmService();
             configure(service);
             sendMock.mockResolvedValue('message-id');
@@ -84,7 +84,51 @@ describe('FcmService', () => {
             const result = await service.send('token-1', chatMessagePayload);
 
             expect(result).toBe('ok');
-            expect(sendMock).toHaveBeenCalledWith({ token: 'token-1', data: { payload: JSON.stringify(chatMessagePayload) } });
+            expect(sendMock).toHaveBeenCalledWith(expect.objectContaining({ token: 'token-1', data: { payload: JSON.stringify(chatMessagePayload) } }));
+        });
+
+        // Without a `notification` block FCM renders nothing at all while the app is backgrounded
+        // or killed — which is the case native push exists to cover.
+        it('adds a notification block so the OS can render it with no app code running', async () => {
+            const service = new FcmService();
+            configure(service);
+            sendMock.mockResolvedValue('message-id');
+
+            await service.send('token-1', chatMessagePayload);
+
+            expect(sendMock).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    notification: { title: 'lobby', body: 'Sender: hello there' },
+                    android: { notification: { tag: 'chat:lobby' } },
+                    apns: { headers: { 'apns-collapse-id': 'chat:lobby' } },
+                }),
+            );
+        });
+
+        // It asks other devices to CLOSE notifications — a notification block would have it draw
+        // the very thing it exists to clean up.
+        it('leaves dismiss-all as a silent data-only message', async () => {
+            const service = new FcmService();
+            configure(service);
+            sendMock.mockResolvedValue('message-id');
+
+            await service.send('token-1', { type: 'dismiss-all' });
+
+            expect(sendMock).toHaveBeenCalledWith({ token: 'token-1', data: { payload: JSON.stringify({ type: 'dismiss-all' }) } });
+        });
+
+        // APNs rejects the whole send if this header exceeds 64 bytes, which a long enough room name
+        // would otherwise do.
+        it('truncates a long collapse id to the 64 bytes APNs allows', async () => {
+            const service = new FcmService();
+            configure(service);
+            sendMock.mockResolvedValue('message-id');
+            const roomName = 'r'.repeat(200);
+
+            await service.send('token-1', { ...chatMessagePayload, roomName, tag: `chat:${roomName}` });
+
+            const sent = sendMock.mock.calls[0][0] as { apns: { headers: Record<string, string> } };
+            expect(sent.apns.headers['apns-collapse-id']).toHaveLength(64);
         });
 
         it('reports "gone" when the token is no longer registered', async () => {

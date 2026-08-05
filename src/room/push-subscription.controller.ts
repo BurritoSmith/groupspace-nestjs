@@ -2,12 +2,14 @@ import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Req, U
 import { Request } from 'express';
 import { PushSubscriptionService } from './push-subscription.service';
 import { PushNotificationService } from './push-notification.service';
+import { normalizePushPlatform } from './push-platform';
 import { SessionAuthGuard } from './session-auth.guard';
 
 interface RegisterSubscriptionBody {
     deviceId?: unknown;
     endpoint?: unknown;
     keys?: { p256dh?: unknown; auth?: unknown };
+    platform?: unknown;
 }
 
 interface ActiveBody {
@@ -40,7 +42,12 @@ export class PushSubscriptionController {
         if (!deviceId || !endpoint || !p256dh || !auth) {
             throw new BadRequestException('A push subscription needs a deviceId, endpoint, and keys');
         }
-        await this.pushSubscriptions.register(request.userId ?? '', deviceId, endpoint, p256dh, auth);
+        // Unrecognized or absent degrades to 'web' rather than 400ing: a client too old to send this
+        // field at all still has a working subscription, it just takes no part in the native-wins
+        // suppression until it next re-registers. Failing the request instead would break push for
+        // every already-deployed browser tab the moment this shipped.
+        const platform = normalizePushPlatform(body.platform) ?? 'web';
+        await this.pushSubscriptions.register(request.userId ?? '', deviceId, endpoint, p256dh, auth, platform);
         return { ok: true };
     }
 

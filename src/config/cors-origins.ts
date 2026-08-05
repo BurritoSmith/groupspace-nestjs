@@ -26,6 +26,14 @@ export function getAllowedOrigins(): string[] {
         // entry here. The port is fixed (not chosen at runtime) because it is part of the origin
         // registered with Google; see electron/static-server.ts.
         'http://localhost:41730',
+        // The Capacitor mobile app. Its WebView serves the same Angular bundle from a built-in
+        // origin rather than over the network, and that origin differs per platform: iOS uses the
+        // custom `capacitor` scheme, while Android is configured with `androidScheme: 'https'` (see
+        // capacitor.config.ts) so the WebView counts as a secure context — getUserMedia and the
+        // Notification API both refuse to run otherwise. There is no port and no host to vary, so
+        // these two strings cover every install of the app on every device.
+        'capacitor://localhost',
+        'https://localhost',
         ...configured,
     ];
 }

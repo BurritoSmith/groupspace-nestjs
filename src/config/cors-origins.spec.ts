@@ -35,6 +35,18 @@ describe('getAllowedOrigins', () => {
         expect(origins).toContain('https://192-168-1-222.sslip.io:4200');
     });
 
+    // The Capacitor WebView serves the bundle from a built-in origin rather than over the network,
+    // and it differs per platform: iOS uses the custom `capacitor` scheme, Android is configured
+    // with androidScheme 'https' so the WebView counts as a secure context (getUserMedia and the
+    // Notification API both refuse to run otherwise). Neither has a port or a host that varies, so
+    // these two cover every install on every device.
+    it('allows both native app origins', () => {
+        const origins = getAllowedOrigins();
+
+        expect(origins).toContain('capacitor://localhost');
+        expect(origins).toContain('https://localhost');
+    });
+
     it('appends FRONTEND_ORIGIN entries, trimmed, without dropping the built-ins', () => {
         process.env.FRONTEND_ORIGIN = 'https://one.example , https://two.example';
 

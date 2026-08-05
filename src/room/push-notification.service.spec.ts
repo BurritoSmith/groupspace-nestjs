@@ -22,6 +22,7 @@ function createService() {
         register: jest.fn(),
         unregister: jest.fn(),
         listForUser: jest.fn().mockResolvedValue([]),
+        listAllForPlatform: jest.fn().mockResolvedValue([]),
         deleteById: jest.fn().mockResolvedValue(undefined),
     };
     const fakeFcm = { isConfigured: jest.fn().mockReturnValue(false), send: jest.fn().mockResolvedValue('ok') };
@@ -212,14 +213,16 @@ describe('PushNotificationService', () => {
             expect(fakePushSubscriptions.deleteById).toHaveBeenCalledWith('sub-1');
         });
 
-        it('also sends to a member\'s registered FCM tokens, alongside their web push subscriptions', async () => {
+        it("also sends to a member's registered FCM tokens, alongside their web push subscriptions", async () => {
             const { service, fakeRoomMembership, fakePushSubscriptions, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
             configure(service);
             fakeFcm.isConfigured.mockReturnValue(true);
             fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
             fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
-            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a' }]);
-            fakeFcmTokens.listForUser.mockResolvedValue([{ id: 'token-row-1', token: 'fcm-token-1' }]);
+            // Different platforms, so the native-wins suppression below leaves both alone — this is
+            // the everyday case of the phone app plus a desktop browser.
+            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a', platform: 'desktop' }]);
+            fakeFcmTokens.listForUser.mockResolvedValue([{ id: 'token-row-1', token: 'fcm-token-1', platform: 'android' }]);
 
             await service.notifyChatMessage('lobby', 'user-1', 'Sender', 'hello there', 'msg-1', new Set());
 
@@ -227,6 +230,45 @@ describe('PushNotificationService', () => {
                 'fcm-token-1',
                 expect.objectContaining({ type: 'chat-message', roomName: 'lobby', senderDisplayName: 'Sender', messageText: 'hello there', messageId: 'msg-1' }),
             );
+            expect(webpush.sendNotification).toHaveBeenCalledTimes(1);
+        });
+
+        // The whole point of PushSubscription.platform: one person with the Android app installed
+        // AND notifications still switched on in that phone's Chrome should be told once, not twice.
+        it('suppresses a web push subscription whose platform the user has a native app on', async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([
+                { id: 'sub-android', endpoint: 'https://push.example/android', p256dh: 'p', auth: 'a', platform: 'android' },
+                { id: 'sub-desktop', endpoint: 'https://push.example/desktop', p256dh: 'p', auth: 'a', platform: 'desktop' },
+                { id: 'sub-ios', endpoint: 'https://push.example/ios', p256dh: 'p', auth: 'a', platform: 'ios' },
+            ]);
+            fakeFcmTokens.listForUser.mockResolvedValue([{ id: 'token-row-1', token: 'fcm-token-1', platform: 'android' }]);
+
+            await service.notifyChatMessage('lobby', 'user-1', 'Sender', 'hello there', 'msg-1', new Set());
+
+            const endpoints = (webpush.sendNotification as jest.Mock).mock.calls.map((call) => (call[0] as { endpoint: string }).endpoint);
+            expect(endpoints).toEqual(['https://push.example/desktop', 'https://push.example/ios']);
+            expect(fakeFcm.send).toHaveBeenCalledWith('fcm-token-1', expect.objectContaining({ type: 'chat-message' }));
+        });
+
+        // Rows registered before the platform column existed default to 'web'. Suppressing those
+        // would silently cut off users who have not re-registered yet, so 'web' matches nothing.
+        it("never suppresses a subscription whose platform is the unknown 'web' default", async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Enabled', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-legacy', endpoint: 'https://push.example/legacy', p256dh: 'p', auth: 'a', platform: 'web' }]);
+            fakeFcmTokens.listForUser.mockResolvedValue([{ id: 'token-row-1', token: 'fcm-token-1', platform: 'android' }]);
+
+            await service.notifyChatMessage('lobby', 'user-1', 'Sender', 'hi', 'msg-1', new Set());
+
+            expect(webpush.sendNotification).toHaveBeenCalledTimes(1);
         });
 
         it('deletes an FCM token when FcmService reports it gone', async () => {
@@ -344,6 +386,105 @@ describe('PushNotificationService', () => {
 
             expect(fakeFcmTokens.listForUser).toHaveBeenCalledWith('user-1', 'device-1');
             expect(fakeFcm.send).toHaveBeenCalledWith('fcm-token-2', { type: 'dismiss-all' });
+        });
+    });
+
+    describe('announceAppUpdate', () => {
+        const masterOnly = [{ key: 'notifications-master', deviceId: '', value: true }];
+
+        it('sends an app-update payload to every token on the platform', async () => {
+            const { service, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeUserSettings.getAll.mockResolvedValue(masterOnly);
+            fakeFcmTokens.listAllForPlatform.mockResolvedValue([
+                { id: 'row-1', token: 'tok-1', platform: 'android', userId: 'user-1' },
+                { id: 'row-2', token: 'tok-2', platform: 'android', userId: 'user-2' },
+            ]);
+
+            const result = await service.announceAppUpdate('android', '0.56.0', 560000, 'https://releases.example/converge-0.56.0.apk');
+
+            expect(fakeFcmTokens.listAllForPlatform).toHaveBeenCalledWith('android');
+            expect(result).toEqual({ sent: 2, skipped: 0 });
+            expect(fakeFcm.send).toHaveBeenCalledWith('tok-1', {
+                type: 'app-update',
+                platform: 'android',
+                versionName: '0.56.0',
+                versionCode: 560000,
+                apkUrl: 'https://releases.example/converge-0.56.0.apk',
+            });
+        });
+
+        // Someone who switched notifications off should not be pinged about a release either — but
+        // they still get the in-app banner, which is the path that actually guarantees delivery.
+        it('skips users whose master notification preference is off', async () => {
+            const { service, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeUserSettings.getAll.mockImplementation((userId: string) => Promise.resolve(userId === 'user-1' ? masterOnly : []));
+            fakeFcmTokens.listAllForPlatform.mockResolvedValue([
+                { id: 'row-1', token: 'tok-1', platform: 'android', userId: 'user-1' },
+                { id: 'row-2', token: 'tok-2', platform: 'android', userId: 'user-2' },
+            ]);
+
+            const result = await service.announceAppUpdate('android', '0.56.0', 560000, 'https://releases.example/a.apk');
+
+            expect(result).toEqual({ sent: 1, skipped: 1 });
+            expect(fakeFcm.send).toHaveBeenCalledTimes(1);
+            expect(fakeFcm.send).toHaveBeenCalledWith('tok-1', expect.objectContaining({ type: 'app-update' }));
+        });
+
+        // Unlike the room categories, which an announcement about the app itself does not belong to.
+        it('does not require any per-room notification category to be enabled', async () => {
+            const { service, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeUserSettings.getAll.mockResolvedValue(masterOnly);
+            fakeFcmTokens.listAllForPlatform.mockResolvedValue([{ id: 'row-1', token: 'tok-1', platform: 'android', userId: 'user-1' }]);
+
+            await service.announceAppUpdate('android', '0.56.0', 560000, 'https://releases.example/a.apk');
+
+            expect(fakeFcm.send).toHaveBeenCalledTimes(1);
+        });
+
+        it('reads each distinct user once, however many devices they registered', async () => {
+            const { service, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeUserSettings.getAll.mockResolvedValue(masterOnly);
+            fakeFcmTokens.listAllForPlatform.mockResolvedValue([
+                { id: 'row-1', token: 'tok-1', platform: 'android', userId: 'user-1' },
+                { id: 'row-2', token: 'tok-2', platform: 'android', userId: 'user-1' },
+            ]);
+
+            await service.announceAppUpdate('android', '0.56.0', 560000, 'https://releases.example/a.apk');
+
+            expect(fakeUserSettings.getAll).toHaveBeenCalledTimes(1);
+            expect(fakeFcm.send).toHaveBeenCalledTimes(2);
+        });
+
+        it('is a no-op when FCM is not configured', async () => {
+            const { service, fakeFcmTokens, fakeFcm } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(false);
+
+            const result = await service.announceAppUpdate('android', '0.56.0', 560000, 'https://releases.example/a.apk');
+
+            expect(result).toEqual({ sent: 0, skipped: 0 });
+            expect(fakeFcmTokens.listAllForPlatform).not.toHaveBeenCalled();
+        });
+
+        it('deletes a token FcmService reports gone', async () => {
+            const { service, fakeFcmTokens, fakeFcm, fakeUserSettings } = createService();
+            configure(service);
+            fakeFcm.isConfigured.mockReturnValue(true);
+            fakeFcm.send.mockResolvedValue('gone');
+            fakeUserSettings.getAll.mockResolvedValue(masterOnly);
+            fakeFcmTokens.listAllForPlatform.mockResolvedValue([{ id: 'row-1', token: 'tok-1', platform: 'android', userId: 'user-1' }]);
+
+            await service.announceAppUpdate('android', '0.56.0', 560000, 'https://releases.example/a.apk');
+
+            expect(fakeFcmTokens.deleteById).toHaveBeenCalledWith('row-1');
         });
     });
 });

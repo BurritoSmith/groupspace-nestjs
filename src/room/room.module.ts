@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
+import { AdminTokenGuard } from './admin-token.guard';
+import { AppUpdateController } from './app-update.controller';
 import { ChatMediaController } from './chat-media.controller';
 import { ChatMediaService } from './chat-media.service';
 import { ChatReactionService } from './chat-reaction.service';
@@ -48,7 +50,16 @@ import { VideoThumbnailService } from './video-thumbnail.service';
             },
         }),
     ],
-    controllers: [ChatMediaController, GifsController, InvitationsController, UserSettingsController, RoomsController, PushSubscriptionController, FcmTokenController],
+    controllers: [
+        ChatMediaController,
+        GifsController,
+        InvitationsController,
+        UserSettingsController,
+        RoomsController,
+        PushSubscriptionController,
+        FcmTokenController,
+        AppUpdateController,
+    ],
     providers: [
         RoomGateway,
         RoomService,
@@ -66,6 +77,7 @@ import { VideoThumbnailService } from './video-thumbnail.service';
         LinkPreviewService,
         GiphyService,
         SessionAuthGuard,
+        AdminTokenGuard,
         InvitationsService,
         RoomMembershipService,
         PushSubscriptionService,

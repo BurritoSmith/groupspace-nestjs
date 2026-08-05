@@ -99,6 +99,14 @@ model PushSubscription {
   endpoint  String
   p256dh    String
   auth      String
+  // Which OS the SUBSCRIBING BROWSER runs on — 'android' | 'ios' | 'desktop', or 'web' meaning
+  // "unknown", which is what every row predating this column holds. It exists purely so a native
+  // app can suppress the duplicate: PushNotificationService skips any subscription whose platform
+  // matches one this user has a live FcmToken for, so installing the Android app silences that
+  // phone's browser push without touching the same user's desktop browser. 'web' is never matched
+  // by anything, so an un-backfilled row keeps working exactly as before — the client re-registers
+  // on boot, which is what upgrades it in place.
+  platform  String   @default("web")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
