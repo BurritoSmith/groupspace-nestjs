@@ -42,7 +42,25 @@ export interface IDismissAllPush {
     type: 'dismiss-all';
 }
 
-export type PushPayload = IChatMessagePush | IPeerJoinedPush | IDismissAllPush;
+/**
+ * "A newer build of the native app is out." Unlike every other member of this union this is about
+ * the app itself rather than a room, so it is fanned out by AppUpdateController to every FcmToken on
+ * one platform rather than to a room's members — see that file for why it respects the master
+ * notification preference but none of the per-room categories.
+ *
+ * FCM-only in practice: the Android app is distributed as a sideloaded APK, so it is the only client
+ * that can act on this. push-sw.js ignores the type outright rather than showing a browser
+ * notification about an APK the browser cannot install.
+ */
+export interface IAppUpdatePush {
+    type: 'app-update';
+    platform: 'android' | 'ios';
+    versionName: string;
+    versionCode: number;
+    apkUrl: string;
+}
+
+export type PushPayload = IChatMessagePush | IPeerJoinedPush | IDismissAllPush | IAppUpdatePush;
 
 export const chatMessageTag = (roomName: string): string => `chat:${roomName}`;
 export const peerJoinedTag = (roomName: string): string => `peer-joined:${roomName}`;

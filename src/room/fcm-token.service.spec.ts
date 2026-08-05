@@ -46,7 +46,7 @@ describe('FcmTokenService', () => {
 
             expect(fakePrisma.fcmToken.findMany).toHaveBeenCalledWith({
                 where: { userId: 'user-1' },
-                select: { id: true, token: true },
+                select: { id: true, token: true, platform: true },
             });
         });
 
@@ -58,7 +58,7 @@ describe('FcmTokenService', () => {
 
             expect(fakePrisma.fcmToken.findMany).toHaveBeenCalledWith({
                 where: { userId: 'user-1', deviceId: { not: 'device-1' } },
-                select: { id: true, token: true },
+                select: { id: true, token: true, platform: true },
             });
         });
     });

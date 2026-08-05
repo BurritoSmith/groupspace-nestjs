@@ -40,10 +40,27 @@ describe('PushSubscriptionController', () => {
                 deviceId: 'device-1',
                 endpoint: 'https://push.example/ep',
                 keys: { p256dh: 'p', auth: 'a' },
+                platform: 'android',
             });
 
-            expect(pushSubscriptions.register).toHaveBeenCalledWith('user-1', 'device-1', 'https://push.example/ep', 'p', 'a');
+            expect(pushSubscriptions.register).toHaveBeenCalledWith('user-1', 'device-1', 'https://push.example/ep', 'p', 'a', 'android');
             expect(result).toEqual({ ok: true });
+        });
+
+        // Degrades rather than 400s, unlike the FCM token endpoint: failing here would have broken
+        // push for every already-deployed browser tab the moment the column shipped. 'web' takes
+        // part in no suppression, so the subscription simply behaves as it did before.
+        it.each([[undefined], ['windows'], [42]])('falls back to the "web" platform for %p', async (platform) => {
+            const { controller, pushSubscriptions } = createController();
+
+            await controller.register(fakeRequest('user-1'), {
+                deviceId: 'device-1',
+                endpoint: 'https://push.example/ep',
+                keys: { p256dh: 'p', auth: 'a' },
+                platform,
+            });
+
+            expect(pushSubscriptions.register).toHaveBeenCalledWith('user-1', 'device-1', 'https://push.example/ep', 'p', 'a', 'web');
         });
 
         it('rejects a request missing any required field', async () => {
