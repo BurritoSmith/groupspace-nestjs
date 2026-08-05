@@ -98,14 +98,19 @@ export class PushNotificationService implements OnModuleInit {
             return;
         }
         const members = await this.roomMembership.listMembersWithProfile(roomName);
+        this.logger.debug(
+            `notify ${payload.type} in ${roomName}: actor=${actorUserId} members=[${members.map((m) => m.userId).join(',')}] focused=[${[...focusedUserIds].join(',')}]`,
+        );
         const recipients = members.filter((member) => member.userId !== actorUserId && !focusedUserIds.has(member.userId));
         await Promise.all(
             recipients.map(async (member) => {
                 const settings = await this.userSettings.getAll(member.userId);
                 if (!this.isEnabled(settings, categoryKey)) {
+                    this.logger.debug(`skip ${member.userId}: category "${categoryKey}" not enabled`);
                     return;
                 }
                 const subscriptions = await this.pushSubscriptions.listForUser(member.userId);
+                this.logger.debug(`sending to ${member.userId}: ${subscriptions.length} subscription(s)`);
                 await Promise.all(subscriptions.map((sub) => this.send(sub, payload)));
             }),
         );
@@ -118,16 +123,18 @@ export class PushNotificationService implements OnModuleInit {
 
     private async send(subscription: IPushSubscriptionRow, payload: PushPayload): Promise<void> {
         try {
-            await webpush.sendNotification(
+            const result = await webpush.sendNotification(
                 { endpoint: subscription.endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } },
                 JSON.stringify(payload),
             );
+            this.logger.debug(`push accepted by vendor (status ${result?.statusCode}) for subscription ${subscription.id}`);
         } catch (error: unknown) {
             const statusCode = (error as { statusCode?: number }).statusCode;
             if (statusCode === 404 || statusCode === 410) {
+                this.logger.debug(`subscription ${subscription.id} gone (${statusCode}) — deleting`);
                 await this.pushSubscriptions.deleteById(subscription.id);
             } else {
-                this.logger.warn(`Push send failed (${statusCode ?? 'unknown'}): ${error instanceof Error ? error.message : String(error)}`);
+                this.logger.warn(`Push send failed (${statusCode ?? 'unknown'}) for subscription ${subscription.id}: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
     }
