@@ -5,16 +5,30 @@ describe('RoomGateway', () => {
     let gateway: RoomGateway;
     let emitSpy: jest.Mock;
     let toSpy: jest.Mock;
-    let fakeRoomService: { events: { on: jest.Mock }; setMicSelfMuted: jest.Mock; setConsumerQuality: jest.Mock; closePeer: jest.Mock };
+    let fakeRoomService: {
+        events: { on: jest.Mock };
+        setMicSelfMuted: jest.Mock;
+        setConsumerQuality: jest.Mock;
+        closePeer: jest.Mock;
+        getFocusedUserIds: jest.Mock;
+    };
     let fakeChatService: { saveMessage: jest.Mock; updateLinkPreview: jest.Mock; softDelete: jest.Mock; updateAttachments: jest.Mock };
     let fakeUserSettingsService: { save: jest.Mock; getAll: jest.Mock };
     let fakeChatMediaService: { publicBase: string; ensureVideoThumbnail: jest.Mock };
     let fakeLinkPreviewService: { fetchPreview: jest.Mock };
     let fakeChatReactionService: { toggle: jest.Mock; listGrouped: jest.Mock };
+    let fakeRoomMembershipService: { recordVisit: jest.Mock; listMembersWithProfile: jest.Mock };
+    let fakePushNotificationService: { notifyChatMessage: jest.Mock; notifyPeerJoined: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
-        fakeRoomService = { events: { on: jest.fn() }, setMicSelfMuted: jest.fn(), setConsumerQuality: jest.fn(), closePeer: jest.fn() };
+        fakeRoomService = {
+            events: { on: jest.fn() },
+            setMicSelfMuted: jest.fn(),
+            setConsumerQuality: jest.fn(),
+            closePeer: jest.fn(),
+            getFocusedUserIds: jest.fn().mockReturnValue(new Set()),
+        };
         fakeChatService = {
             saveMessage: jest.fn(),
             updateLinkPreview: jest.fn().mockResolvedValue(undefined),
@@ -32,6 +46,8 @@ describe('RoomGateway', () => {
         // now fires alongside them.
         fakeLinkPreviewService = { fetchPreview: jest.fn().mockResolvedValue(null) };
         fakeChatReactionService = { toggle: jest.fn().mockResolvedValue(undefined), listGrouped: jest.fn().mockResolvedValue([]) };
+        fakeRoomMembershipService = { recordVisit: jest.fn().mockResolvedValue(undefined), listMembersWithProfile: jest.fn().mockResolvedValue([]) };
+        fakePushNotificationService = { notifyChatMessage: jest.fn().mockResolvedValue(undefined), notifyPeerJoined: jest.fn().mockResolvedValue(undefined) };
         gateway = new RoomGateway(
             fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
@@ -44,6 +60,8 @@ describe('RoomGateway', () => {
             fakeChatMediaService as never, // chatMediaService
             fakeLinkPreviewService as never, // linkPreviewService
             fakeChatReactionService as never, // chatReactionService
+            fakeRoomMembershipService as never, // roomMembershipService
+            fakePushNotificationService as never, // pushNotificationService
         );
         emitSpy = jest.fn();
         toSpy = jest.fn().mockReturnValue({ emit: emitSpy });
@@ -625,6 +643,8 @@ describe('RoomGateway', () => {
                 {} as never, // chatMediaService
                 {} as never, // linkPreviewService
                 {} as never, // chatReactionService
+                fakeRoomMembershipService as never, // roomMembershipService
+                fakePushNotificationService as never, // pushNotificationService
             );
 
             const result = await localGateway.onGetRecordingSession({ id: 'session-1' });
@@ -652,6 +672,8 @@ describe('RoomGateway', () => {
                 {} as never, // chatMediaService
                 {} as never, // linkPreviewService
                 {} as never, // chatReactionService
+                fakeRoomMembershipService as never, // roomMembershipService
+                fakePushNotificationService as never, // pushNotificationService
             );
 
             const result = await localGateway.onGetRecordingSession({ id: 'missing' });

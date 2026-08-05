@@ -173,12 +173,27 @@ export interface IJoinRoomResult {
     // Every saved setting for this user, regardless of room — settings are per-user, not
     // per-room, so this doesn't vary by roomName. See UserSettingsService/ISaveUserSettingPayload.
     userSettings: IUserSettingRecord[];
+    // Every user who has ever been a member of this room (see RoomMembershipService), live profile
+    // fields rather than a point-in-time snapshot — feeds the presence-style avatar roster above
+    // chat, greyed out for whoever isn't in `peers` above right now.
+    roomMembers: IRoomMemberProfile[];
+}
+
+export interface IRoomMemberProfile {
+    userId: string;
+    displayName: string;
+    pictureUrl: string;
 }
 
 export interface IUserSettingRecord {
     key: string;
     deviceId: string;
     value: unknown;
+}
+
+/** See IPeerState.focused's comment and RoomGateway.onSetFocus. */
+export interface ISetFocusPayload {
+    focused: boolean;
 }
 
 export interface ISaveUserSettingPayload {
@@ -278,6 +293,11 @@ export interface IPeerState {
     // = false) — invisible to the server otherwise, so this flag exists purely to let a late joiner's
     // join-room ack reflect the current state of everyone already in the room. See setMicSelfMuted.
     micSelfMuted: boolean;
+    // Whether THIS device currently has the room's tab visible and focused — client-reported (see
+    // 'set-focus'), defaults true at join (a fresh join is assumed to mean "looking at it right
+    // now" until told otherwise). PushNotificationService uses this to skip a push to a user who's
+    // already looking at the room live on some device — see RoomService.getFocusedUserIds.
+    focused: boolean;
     roomName: string;
     router: mediasoupTypes.Router;
     sendTransport: mediasoupTypes.WebRtcTransport | null;
