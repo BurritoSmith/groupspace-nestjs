@@ -11,6 +11,13 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.8] - 2026-08-05
+
+### Added
+
+- Add Web Push notifications and persistent room membership ([#51](https://github.com/BurritoSmith/groupspace-nestjs/pull/51))
+- Add plan doc for push notifications and room membership ([#51](https://github.com/BurritoSmith/groupspace-nestjs/pull/51))
+
 ## [0.27.7] - 2026-08-04
 
 ### Added
@@ -405,7 +412,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.7...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.8...HEAD
+[0.27.8]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.7...v0.27.8
 [0.27.7]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.6...v0.27.7
 [0.27.6]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.5...v0.27.6
 [0.27.5]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.4...v0.27.5
