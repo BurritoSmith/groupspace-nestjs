@@ -19,6 +19,11 @@ export interface IChatMessagePush {
     /** Large image shown in the expanded notification — the same attachment's full/display
      *  rendition, or an album's cover. */
     imageUrl?: string;
+    /** The sender's account picture, used as the notification icon whenever `iconUrl` above isn't
+     *  set (i.e. every message without an image/gif attachment). Without it Chrome for Android
+     *  draws its own letter placeholder from the origin, which reads as a stray "D" rather than as
+     *  anything to do with who sent the message. Absent for an account with no Google picture. */
+    senderPictureUrl?: string;
 }
 
 export interface IPeerJoinedPush {
@@ -26,6 +31,9 @@ export interface IPeerJoinedPush {
     roomName: string;
     joinerDisplayName: string;
     tag: string;
+    /** Same role as IChatMessagePush.senderPictureUrl — this notification never has an attachment
+     *  to show, so the avatar is the only icon it will ever carry. */
+    joinerPictureUrl?: string;
 }
 
 /** Silent — asks every OTHER device to close whatever it's currently showing, because the user
