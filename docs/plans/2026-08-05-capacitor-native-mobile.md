@@ -370,3 +370,103 @@ sniffer**, so native picks must emit JPEG. Also: Web/native Share Target; native
 (`save-file.ts`'s File System Access API works on neither platform); haptics; native clipboard;
 `@capacitor-community/keep-awake` replacing `wake-lock.ts`; replacing the WebCodecs/ffmpeg
 compression stack with native transcode; and Android `MediaProjection` screen share.
+
+---
+
+# As shipped
+
+Recorded after implementation, so the plan above stays what was approved and this is where it
+turned out to be wrong. Frontend commits `b76b0d7`, `e99bfea`, `9ee71e6`, `fada2ce`; backend
+`c55d96a`. 1970 frontend tests, 461 backend, both suites and both builds green.
+
+## Where reality differed
+
+**Capacitor 8's iOS uses Swift Package Manager, not CocoaPods.** The plan assumed `pod install` was
+the one step needing macOS. There is no Podfile at all — `cap sync ios` regenerates a
+`Package.swift` from the installed plugins. So the CI job is `xcodebuild -project`, not
+`-workspace`, with no Ruby toolchain, and iOS drift is even cheaper to catch than planned.
+
+**AppInstaller has no iOS implementation, deliberately.** An unregistered Capacitor plugin already
+rejects with "not implemented", which is the correct answer where no package installer exists.
+`AppUpdate` treats a rejection from `isSupported()` as unsupported, so a Swift file whose only job
+was to refuse would have been a file to maintain and compile for no behavioural difference.
+
+**`chat.ts` keeps `DesktopBridge.isDesktop`.** The plan said all three consumers move to
+`PlatformShell`. Two did. The third guards a call *into* the Electron API (`isWindowFocused`,
+`focusWindow`), where "is the bridge there?" is the right question and belongs with the bridge. The
+split is documented in `platform-shell.ts` so it does not read as an oversight.
+
+**Native storage is restored in `main.ts`, not an app initializer.** Angular runs initializers in
+*parallel*, and one of them (`Language`) transitively constructs `User`, which reads localStorage
+synchronously in its constructor — so an initializer could never reliably win that race. Doing it
+before `bootstrapApplication` can.
+
+**`AppUpdate` compares `versionName`, not `versionCode`.** That lets both update checks — web and
+native — share one comparator (`compare-versions.ts`) instead of two mechanisms that would
+eventually disagree. `versionCode` remains Android's own install-time concern, which it enforces
+itself by refusing an APK that does not increase it.
+
+**The versionCode derivation self-tests instead of having a spec.** `tsconfig.spec.json` only
+includes `src/**/*.spec.ts`, and the derivation belongs to the build scripts. It runs as
+`node scripts/version-code.mjs --self-test`, which the Android workflow executes before building.
+
+**`APP_INSTALLER` is an InjectionToken.** Angular's unit-test system refuses `vi.mock` on relative
+imports and directs you to TestBed, so a module-level plugin import would have left the whole update
+flow untestable.
+
+**Plugin choice.** `@codetrix-studio/capacitor-google-auth` was rejected on inspection — its peer
+range is Capacitor 6 and its only recent publish is an RC. `@capgo/capacitor-social-login` (8.3.40)
+targets Capacitor 8, needs no Firebase JS SDK, and its typings confirm it returns a Google `idToken`
+minted against the `webClientId` — which is exactly the audience the backend already verifies.
+
+## Added beyond the plan
+
+- **`isAllowedReleaseUrl` on the announce endpoint.** Every install is told to download and install
+  whatever `apkUrl` an announcement carries, so it is confined to a configured `https` prefix,
+  matched on a parsed URL (host + path on a directory boundary) rather than a string `startsWith`.
+- **`AdminTokenGuard` fails closed.** Unlike VAPID and FCM, which degrade to a silent no-op when
+  unconfigured, an unset `APP_ADMIN_TOKEN` refuses every request: "nobody can announce" is a missing
+  feature, "anyone can broadcast to every install" is an open door.
+- **sha256 verification before install**, with the file deleted on mismatch.
+- **`--notify-reload` works with a `none` bump**, and the deploy workflow pushes that commit — it
+  rewrites the constant and the manifest without bumping, and an unpushed commit would be reverted
+  by the next deploy.
+- **`update.dismiss` was dropped** in favour of the existing `common.dismiss`, rather than shipping
+  a second copy of one word across nine locale files.
+
+## Still needed before this runs on a device
+
+None of these are code:
+
+1. **Firebase console** — register the Android app, download `google-services.json` into
+   `android/app/`. Push does nothing without it (`build.gradle` logs and carries on).
+2. **Google Cloud console** — an Android OAuth client for `tv.groupspace.converge` with the SHA-1 of
+   *both* the debug and release keystores. Missing the release one is the classic trap: sign-in
+   works in debug and fails only in the shipped APK.
+3. **Release keystore** — generate once, store outside the repo alongside the Firebase key, and set
+   `ANDROID_KEYSTORE_BASE64` / `_PASSWORD` / `_KEY_ALIAS` / `_KEY_PASSWORD`. Losing it means every
+   installed user must uninstall and reinstall.
+4. **GCS bucket** `converge-app-releases`, public-read.
+5. **Backend env** — `APP_ADMIN_TOKEN` and `APP_RELEASE_URL_PREFIX` (both documented in
+   `deploy/.env.example`), plus `APP_ADMIN_TOKEN` and `BACKEND_URL` as GitHub secrets.
+6. **iOS**, when there is a Mac and a paid Apple Developer account: an iOS OAuth client into
+   `environment.googleIosClientId`, `GoogleService-Info.plist`, and an APNs auth key.
+
+## Known limitations, accepted
+
+- **Update announcements are English-only.** The other push bodies dodge localization by being pure
+  user content; this one is app prose and the backend has no i18n. Doing it properly means FCM's
+  `titleLocKey` pointing at Android string resources, which would mean duplicating
+  `public/i18n/*.json` into `res/values-*/strings.xml`. The in-app banner says it correctly in the
+  user's own language.
+- **No sender avatar on an OS-drawn notification.** Android's `notification.icon` names a drawable
+  compiled into the APK, not a URL. The foreground path can still render one.
+- **No coalescing on the OS-drawn path.** `push-sw.js` stacks "+2 more" because it can read back its
+  own live notifications; the OS has no such state, so `tag` gives replacement instead.
+- **Screen share is unavailable on native.** Not a regression — Android Chrome has no
+  `getDisplayMedia` either. A real implementation means ReplayKit and MediaProjection.
+- **The storage mirror has a window.** Signing in and losing storage without ever backgrounding the
+  app would still lose the session. Closing it would mean threading a mirror call through `User` and
+  `InvitationGate` for a sequence that needs storage eviction inside one uninterrupted session.
+- **Safe-area insets are applied at the app shell**, so video is inset rather than full-bleed. That
+  is the conservative default and wants a look on a real device.
