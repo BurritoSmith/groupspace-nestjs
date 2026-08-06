@@ -508,14 +508,72 @@ The benchmark was run through a temporary `window.__bench` hook and a bench APK 
 `strip-native-assets` (the normal native build has no ffmpeg core to load). Neither is committed;
 recreating them is a ten-minute job, and `docs/` is the only record.
 
-## Phase 2 — remaining
+## Phase 2.6 — done
 
-1. **2.6 MediaProjection screen share** — currently hidden on native, which is not a regression
-   (Android Chrome has no `getDisplayMedia` either). The last item in this plan.
+Screen sharing on Android, via MediaProjection. The use case is remote support — talking someone
+through their own phone — which is why it captures the whole DISPLAY rather than the app, and why it
+has to keep running while Converge is backgrounded.
+
+### Four measurements decided the design
+
+All on a Galaxy S10+, and each one overturned an assumption:
+
+1. **`getDisplayMedia` is `undefined`** in the Android WebView (Chrome 151) — not restricted,
+   *absent*. So there is no web route at all, and the plan's note that the control was "hidden on
+   native" was wrong on two counts: it was hidden by the HANDSET BREAKPOINT, which also hid it on a
+   native tablet where it appeared and failed silently with a TypeError.
+2. **Backgrounding does not throttle the pipeline** — the thing that looked fatal. Idle, timers ran
+   14 times in 8.3s and rAF stopped dead. But with live audio and a connected `RTCPeerConnection`,
+   **91 ticks against 91 expected**: Chromium's media exemption fires, and a screen share only ever
+   runs during a call, which is exactly when the app has both.
+3. **A local HTTP server is unreachable.** The WebView's origin is `https://localhost`, so
+   `http://127.0.0.1` is refused as mixed content — measured with the device itself able to reach a
+   server the WebView could not. `allowMixedContent` would fix it by weakening every request the app
+   makes, which is a bad trade for one feature.
+4. **WebCodecs + Insertable Streams are both present**, and `VideoDecoder` accepts raw Annex-B.
+
+Point 4 removed most of the work. The design was going to be fragmented MP4 into Media Source
+Extensions — which needs a hand-rolled muxer, because Android's `MediaMuxer` writes its index on
+`stop()` and cannot produce a streamable file. Instead the plugin emits `MediaCodec`'s output
+verbatim, no container, and the web layer decodes it into a `MediaStreamTrackGenerator`:
+
+`MediaProjection → MediaCodec → bridge → VideoDecoder → VideoFrame → track → mediasoup`
+
+No muxer, no MSE, no canvas, nothing on disk. Validated before any of it was written: 60 access
+units decoded in 204ms, first frame at 116ms, generator track `live` at 720x1280. **No canvas is
+deliberate** — drawing would tie the pipeline to `requestAnimationFrame`, which stops when
+backgrounded, and backgrounded is the whole point.
+
+Frames cross the Capacitor bridge as base64, ~250 KB/s at 1.5 Mbps. Ugly on paper, but point 3 rules
+out the alternative and the bridge carries it comfortably.
+
+### Product decisions, deliberately not technical ones
+
+- **User-initiated only.** There is no "request a share" — someone being helped through their phone
+  is often the least equipped to judge what they are agreeing to, so it begins with them pressing a
+  button, never with someone else asking.
+- **A localized warning before the OS sheet.** Android's own dialog asks permission; it does not
+  explain that notifications arriving mid-call and passwords as they are typed are captured too.
+  `ScreenShareConsentDialog` says that in all nine languages. The Android foreground notification is
+  English-only, the same accepted limitation update announcements carry.
+- **The foreground service is required**, not a nicety: from Android 14 `getMediaProjection` throws
+  unless a `mediaProjection` service is already running. Its notification is ongoing and
+  undismissable, which is right — it is the reminder that this is happening.
+
+### Still unmeasured
+
+Real glass-to-glass latency and long-run stability, both of which need two devices in a room. The
+decode side is bounded (116ms to first frame) but the encoder, bridge and mediasoup re-encode are
+not yet measured end to end.
+
+## Phase 2 — complete
+
+Every item in this plan has now shipped. Screen share was the last.
 
 ## Open questions for the user
 
 - **Native transcode output size** — see the 2x note above.
+- **Screen-share latency end to end**, which needs two devices in a room to measure.
 - **The chevron fix** (`user-settings-dialog.scss`) was a pre-existing defect, not native-only.
   Worth confirming the web build's settings dialog was showing "chev" too.
 
