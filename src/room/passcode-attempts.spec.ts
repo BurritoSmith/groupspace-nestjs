@@ -4,7 +4,11 @@ const MINUTE = 60 * 1000;
 
 function createAttempts() {
     let now = Date.now();
-    const attempts = new PasscodeAttempts(() => now);
+    const attempts = new PasscodeAttempts();
+    // Assigned rather than injected — see the class. A defaulted clock CONSTRUCTOR PARAMETER passed
+    // every test in this file and still killed the app at startup, because Nest reads constructor
+    // parameters as dependencies to resolve.
+    attempts.now = () => now;
     return { attempts, advance: (ms: number) => (now += ms) };
 }
 
