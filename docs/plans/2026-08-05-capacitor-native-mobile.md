@@ -449,7 +449,9 @@ wrong files. This is the same bug the notification deep-link had.
 
 ## Phase 2.5 — done, and the measurements that should shape what happens next
 
-Native video transcode, via Media3's `Transformer`, as a tier in FRONT of WebCodecs and ffmpeg.wasm.
+Native video transcode, via Media3's `Transformer` — written as a tier in front of WebCodecs and
+ffmpeg.wasm, and then **reversed to sit behind them** once it had been measured. It is the failsafe,
+not the default.
 
 **It needed a second piece the plan never mentioned.** `Transformer` transcodes from a URI, and a
 file chosen through the WebView's `<input type="file">` is a `Blob` with no path. So the composer's
@@ -490,10 +492,17 @@ output from 8.7MB to 7.6MB (~2.0 Mbps actual). Pinning `BITRATE_MODE_CBR` to hol
 the export **fail outright** on this device, and `setEnableFallback(true)` did not rescue it — so the
 mode is deliberately left unset and the overshoot is accepted.
 
-**The open consequence:** native output is still roughly 2x the size of the WebCodecs tier's for the
-same input. Faster and lighter on memory, but more bytes uploaded and stored. Worth a decision before
-this is relied on for anything but the largest clips — the current 8MB floor means small clips never
-reach it anyway.
+### What the numbers changed
+
+Native output is roughly 2x the size of the WebCodecs tier's for the same input, at the same speed.
+That settled the ordering: **WebCodecs runs first, native is the fallback.** `VideoCompression`
+never throws — it returns the ORIGINAL file on a failure, a timeout, or an output no smaller than the
+source — so `uploadFile === file` is the exact signal that every web tier came up empty, and only
+then does the native encoder run.
+
+That leaves the native path doing the one job WebCodecs cannot do at all: a clip too large to hold in
+WebView memory, where the bytes never enter the WebView in the first place. It should rarely run,
+and that is the point of it.
 
 The benchmark was run through a temporary `window.__bench` hook and a bench APK built without
 `strip-native-assets` (the normal native build has no ffmpeg core to load). Neither is committed;
