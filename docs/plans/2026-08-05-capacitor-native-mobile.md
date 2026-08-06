@@ -400,37 +400,161 @@ Saving and copying were dead on the phone and now work. Download opens Android's
 it where the user asked, and the download button means the second. `@capacitor/share` is installed
 but unused; an explicit share action is its own control, wanted later.
 
-## Phase 2 — remaining, in the order agreed
+## Phase 2.2 — done
 
-1. **2.2 Camera capture** — the biggest gap. There is no way to take a photo from the composer on
-   ANY platform today; the file input is gallery-only. Must emit JPEG (see the HEIC question below).
-2. **2.3 Haptics + native keep-awake** replacing `wake-lock.ts`.
-3. **2.4 Android share target** — intent filters, a handler, and a "which room?" screen.
-4. **2.5 Native video transcode**, dropping the ffmpeg.wasm tier.
-5. **2.6 MediaProjection screen share** — currently hidden on native, which is not a regression
-   (Android Chrome has no `getDisplayMedia` either).
+Camera capture shipped ("Take a photo from the composer, instead of leaving to go and find one").
+`CameraCapture` is an abstract class with one implementation per shell, chosen in `app.config.ts` the
+same way `ScreenCapture` is. Both settle to one JPEG or nothing: asking Capacitor's camera for a
+`quality` is what forces a re-encode away from the HEIC an iPhone would otherwise hand back.
+`WebCameraCapture` reports itself unsupported on a desktop browser, so the control simply is not
+offered where the capture hint would degrade to an ordinary file dialog.
+
+## Phase 2.3 — dropped
+
+Keep-awake was verified working on device: Android's WebView is Chromium and `https://localhost` is
+a secure context, so `navigator.wakeLock` in `wake-lock.ts` already holds. Replacing it with
+`@capacitor-community/keep-awake` would have been a dependency for no behavioural change. Haptics
+deferred — polish, and nothing is broken without it.
+
+## Phase 2.4 — done
+
+Converge is in Android's share sheet, for images, video, PDFs and plain text.
+
+`ShareTargetPlugin` (Java) is the third custom plugin, alongside `AppInstaller` and `FileSaver`. Two
+details are load-bearing and neither is obvious:
+
+- **A share arrives two entirely different ways.** A cold start delivers it as the launch intent
+  (read in `load()`); a share into a running app arrives at `handleOnNewIntent`. Nothing in the
+  WebView is listening during the first, so both PARK the intent and the web layer pulls it with
+  `consumePendingShare()`. The warm path additionally fires a retained event.
+- **The bytes have to be copied.** A share is a `content://` URI owned by the sending app: the
+  WebView cannot fetch one, and the read grant dies with the activity. Each stream is copied into
+  the app's cache once and handed over as a path, which the web side loads through
+  `Capacitor.convertFileSrc` — the same route `NativeCameraCapture` uses, and for the same reason
+  (a handle crosses the bridge, never the bytes).
+
+The display name from the sending app is untrusted input and is replaced wholesale if it is anything
+but a plain filename — `../` in a share would otherwise write outside the cache directory.
+
+On the web side `ShareTarget` parks the payload and `ShareScreen` (`/share`) picks the room.
+`ChatUploads` is root-scoped, so the attachments are queued BEFORE the room is opened, and the room
+is opened with `?openChat=1` — the same parameter a tapped chat notification uses. Shared text
+becomes the composer draft, handed over by signal rather than a query parameter because a shared
+link is the user's content and URLs get logged, kept in history, and restored on reload.
+
+**The share screen reacts to a signal rather than reading once in its constructor.** Sharing a second
+time while the picker is already up navigates to a route that is already active, and Angular reuses
+the component — a one-shot read would leave the user looking at the previous share and sending the
+wrong files. This is the same bug the notification deep-link had.
+
+## Phase 2.5 — done, and the measurements that should shape what happens next
+
+Native video transcode, via Media3's `Transformer`, as a tier in FRONT of WebCodecs and ffmpeg.wasm.
+
+**It needed a second piece the plan never mentioned.** `Transformer` transcodes from a URI, and a
+file chosen through the WebView's `<input type="file">` is a `Blob` with no path. So the composer's
+attach button had to change too: `MediaPickerPlugin` (ACTION_OPEN_DOCUMENT) copies the selection into
+the app cache and returns paths, and `AttachmentPicker` is the seam that picks it on native and
+leaves the file input alone everywhere else. `native-file-path.ts` holds the File→path association
+in a WeakMap rather than widening every attachment type.
+
+Every native video entry point now yields a path: the picker, a share, and the camera.
+
+### The numbers
+
+Galaxy S10+ (SM-G975U1, Snapdragon 855), one 43.5MB / 30s / 1080p H.264 source, all three tiers back
+to back in the same WebView, median of repeated runs:
+
+| tier | time | output |
+|---|---|---|
+| native (Media3) | **4.3–4.8s** | 7.6MB |
+| WebCodecs | **4.8–5.5s** | 3.6MB |
+| ffmpeg.wasm | **55s** | 1.2MB |
+
+**Native is not meaningfully faster than WebCodecs** — the two are within noise of each other, which
+makes sense: both drive the same hardware encoder. The plan's assumption of a large speed-up was
+wrong, and it was wrong because it predated `7db881e`, which put WebCodecs in front of ffmpeg.
+
+What native actually buys is **memory**: the source never enters the WebView. That is not visible in
+these timings and is the whole reason to keep it — a 300MB clip held as a Blob and decoded frame by
+frame in JavaScript is what gets an app killed on a phone aggressive about background processes, and
+this codebase has been bitten by that twice already (FileSaverPlugin, NativeCameraCapture).
+
+ffmpeg.wasm at **11x slower** confirms it is the tier worth never reaching on a phone. It is already
+stripped from the native bundle, so this is a measurement of the fallback that no longer ships there.
+
+### Encoder bitrate is a hint, not an instruction
+
+The first build requested 2.5 Mbps and measured ~2.3; lowering the request to 1.5 Mbps only moved the
+output from 8.7MB to 7.6MB (~2.0 Mbps actual). Pinning `BITRATE_MODE_CBR` to hold it honestly made
+the export **fail outright** on this device, and `setEnableFallback(true)` did not rescue it — so the
+mode is deliberately left unset and the overshoot is accepted.
+
+**The open consequence:** native output is still roughly 2x the size of the WebCodecs tier's for the
+same input. Faster and lighter on memory, but more bytes uploaded and stored. Worth a decision before
+this is relied on for anything but the largest clips — the current 8MB floor means small clips never
+reach it anyway.
+
+The benchmark was run through a temporary `window.__bench` hook and a bench APK built without
+`strip-native-assets` (the normal native build has no ffmpeg core to load). Neither is committed;
+recreating them is a ten-minute job, and `docs/` is the only record.
+
+## Phase 2 — remaining
+
+1. **2.6 MediaProjection screen share** — currently hidden on native, which is not a regression
+   (Android Chrome has no `getDisplayMedia` either). The last item in this plan.
 
 ## Open questions for the user
 
-- **HEIC.** The chat file input advertises `.heic`, but the backend's MIME sniffer accepts only
-  jpeg/png/gif/webp — so a gallery pick of an iPhone photo fails today, on web as well as native.
-  Add HEIC server-side, or drop it from `accept`? Asked several times, not yet answered.
+- **Native transcode output size** — see the 2x note above.
 - **The chevron fix** (`user-settings-dialog.scss`) was a pre-existing defect, not native-only.
   Worth confirming the web build's settings dialog was showing "chev" too.
 
 ## Still needed before a RELEASE build (none of it code)
 
-Debug builds work today. Release needs:
-
-1. **Release keystore** — generate once, store outside the repo alongside the Firebase key, and set
-   `ANDROID_KEYSTORE_BASE64` / `_PASSWORD` / `_KEY_ALIAS` / `_KEY_PASSWORD` as GitHub secrets. Its
-   SHA-1 must ALSO be registered as a second Android OAuth client, or sign-in works in debug and
-   fails only in the shipped APK. **Lose this key and no installed user can ever update in place.**
-2. **GCS bucket** `converge-app-releases`, public-read.
+1. ~~**Release keystore**~~ — **done.** Generated, stored outside the repo, base64'd into the four
+   GitHub secrets, and its SHA-1 registered as an Android OAuth client. Firebase's "Add fingerprint"
+   does NOT create that client when the project has no Firebase Authentication (this one does not —
+   Converge verifies Google ID tokens itself), so it had to be made directly in the Cloud console.
+   **Lose this key and no installed user can ever update in place.**
+2. ~~**GCS bucket** `converge-app-releases`~~ — **done**, public-read, and with a CORS policy. The
+   CORS part was not in this plan and cost a release to find: the update manifest is fetched by the
+   WebView from origin `https://localhost`, so `latest.json` is a CROSS-ORIGIN request. Without a
+   policy on the bucket it was blocked and swallowed by the update check's silent catch, and no
+   device ever saw an update prompt.
 3. **Backend env** — `APP_ADMIN_TOKEN` and `APP_RELEASE_URL_PREFIX` (documented in
-   `deploy/.env.example`), plus `APP_ADMIN_TOKEN` and `BACKEND_URL` as GitHub secrets.
+   `deploy/.env.example`), plus `APP_ADMIN_TOKEN` and `BACKEND_URL` as GitHub secrets. Still unset as
+   far as anyone has confirmed, so `POST /app/announce-update` has never fired. Not urgent: the
+   in-app `latest.json` check is the path that actually guarantees delivery, and it is what every
+   update so far has ridden on.
 4. **iOS**, when there is a Mac and a paid Apple Developer account: an iOS OAuth client into
-   `environment.googleIosClientId`, `GoogleService-Info.plist`, and an APNs auth key.
+   `environment.googleIosClientId`, `GoogleService-Info.plist`, and an APNs auth key. Note the share
+   target has no iOS half either — that needs a Share Extension, which is a second app target rather
+   than a file in this one.
+
+## Shipped since this plan, and not in it
+
+The plan stopped at "Phase 1 done". Between then and now, in release order:
+
+- **0.56–0.57** — the share link and install landing page (`android/release-page/index.html`,
+  published to the bucket alongside a stable `converge-latest.apk`), and the HEIC transcode on the
+  API (`HeicTranscodeService`, PR #57), which resolved this document's longest-standing open
+  question. `heif-convert` from libheif, NOT ffmpeg: the container's ffmpeg is bookworm's 5.1 and the
+  HEIF demuxer did not land until 7.1, and upgrading it would have put the live recording pipeline at
+  risk over a photo format.
+- **0.58** — Firebase Hosting replaced App Engine for the web app, with the domain unchanged. Both
+  App Engine services deleted.
+- **0.59.0** — notification tap opens the chat panel. The first fix was wrong: it read the query
+  parameter in `ngOnInit`, and same-route navigation REUSES the component so that never re-ran. The
+  fix is a `queryParamMap` subscription.
+- **0.59.1** — the OTA installer race. `DownloadManager.remove()` in a `finally` deleted the APK
+  while the system installer was still reading it asynchronously (`W/InstallStaging: Error staging
+  apk from content URI`), which surfaced as "there's a problem with the app file" on Samsung and
+  Pixel. Removal is now deferred to the start of the NEXT download — the same deferred-cleanup shape
+  `ShareTargetPlugin` uses for its cache directory.
+- **0.59.2** — the notifications master switch became device-scoped (an OS-level revocation on one
+  phone no longer silences the account everywhere), user settings reachable from the join screen, and
+  a socket resync on wake, because a message that arrived while the screen was off never appeared.
 
 ## Dev environment, as it now stands
 
