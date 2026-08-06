@@ -1,3 +1,5 @@
+import { ModuleCapabilityResolver } from './capabilities';
+
 /**
  * What the room layer knows about a module: the little it has to, and nothing else.
  *
@@ -31,6 +33,10 @@ export interface IModuleManifest {
      *  module can add one without a migration, which only works if something validates them at
      *  assignment time rather than discovering the typo when a capability silently never appears. */
     isRole: (value: unknown) => boolean;
+    /** How this module's roles become capabilities, or null for a module that grants none. Carried
+     *  on the manifest rather than in a second array kept alongside it — two parallel lists keyed by
+     *  module id drift the first time somebody adds an entry to one of them. */
+    capabilities: ModuleCapabilityResolver | null;
 }
 
 /** Injection token for the catalog. A string token rather than a class, because the catalog is a
@@ -57,6 +63,12 @@ export function unknownModuleIds(catalog: IModuleManifest[], moduleIds: string[]
  *  them is `unknownModuleIds`'s job and happens first. */
 export function forcesPrivate(catalog: IModuleManifest[], moduleIds: string[]): boolean {
     return moduleIds.some((id) => findManifest(catalog, id)?.requiresPrivate === true);
+}
+
+/** Every enabled module's capability resolver, for handing to `capabilitiesFor`. Derived from the
+ *  catalog so there is exactly one place a module is registered. */
+export function capabilityResolvers(catalog: IModuleManifest[]): ModuleCapabilityResolver[] {
+    return catalog.map((manifest) => manifest.capabilities).filter((resolver): resolver is ModuleCapabilityResolver => resolver !== null);
 }
 
 /** The module roles the creator should hold, given what they just enabled. */

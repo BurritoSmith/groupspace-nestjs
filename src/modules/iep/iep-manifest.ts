@@ -1,5 +1,5 @@
 import { IModuleManifest } from '../../room/module-manifest';
-import { IEP_MODULE_ID, isIepRole } from './iep-capabilities';
+import { IEP_MODULE_ID, iepCapabilities, isIepRole } from './iep-capabilities';
 
 /**
  * How the IEP module declares itself to the room layer.
@@ -21,4 +21,5 @@ export const iepManifest: IModuleManifest = {
     // able to facilitate it.
     creatorRole: 'administrator',
     isRole: isIepRole,
+    capabilities: iepCapabilities,
 };

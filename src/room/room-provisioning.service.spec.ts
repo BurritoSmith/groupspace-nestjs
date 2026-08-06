@@ -9,6 +9,7 @@ const manifest = (id: string, overrides: Partial<IModuleManifest> = {}): IModule
     defaultEnabled: true,
     creatorRole: null,
     isRole: () => false,
+    capabilities: null,
     ...overrides,
 });
 

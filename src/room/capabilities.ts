@@ -92,3 +92,23 @@ export function capabilitiesFor(context: IRoomContext, moduleResolvers: ModuleCa
 export function can(context: IRoomContext, capability: Capability, moduleResolvers: ModuleCapabilityResolver[] = []): boolean {
     return capabilitiesFor(context, moduleResolvers).has(capability);
 }
+
+/** Ordering only — this says nothing about what each role may do, which is what the resolver above
+ *  is for. It exists so that accepting an invitation can never LOWER what someone already holds. */
+const ROOM_ROLE_RANK: Record<RoomRole, number> = { owner: 3, moderator: 2, member: 1, guest: 0 };
+
+/**
+ * The greater of two room roles.
+ *
+ * The case this exists for: an owner is emailed an invitation to their own room as a `member` — by
+ * a moderator adding everyone at once, say — and accepting it must not demote them out of their own
+ * room. An unrecognised role ranks lowest, so a stale string can never win.
+ */
+export function highestRoomRole(a: RoomRole, b: RoomRole): RoomRole {
+    return (ROOM_ROLE_RANK[a] ?? -1) >= (ROOM_ROLE_RANK[b] ?? -1) ? a : b;
+}
+
+/** Whether a string is a room role this app recognises. */
+export function isRoomRole(value: unknown): value is RoomRole {
+    return typeof value === 'string' && value in ROOM_ROLE_RANK;
+}

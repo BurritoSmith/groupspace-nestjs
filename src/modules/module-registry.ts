@@ -24,6 +24,7 @@ const builtInManifest = (id: string): IModuleManifest => ({
     creatorRole: null,
     // No roles of their own. Being in the room is the only status chat has ever recognised.
     isRole: () => false,
+    capabilities: null,
 });
 
 export const MODULE_CATALOG_VALUE: IModuleManifest[] = [builtInManifest('chat'), builtInManifest('live'), builtInManifest('playback'), iepManifest];
