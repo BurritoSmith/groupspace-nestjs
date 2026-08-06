@@ -39,6 +39,44 @@ describe('sniffMediaType', () => {
         expect(sniffMediaType(mp4)).toBe('video/mp4');
     });
 
+    it('recognizes a HEIC by its ftyp major brand', () => {
+        const heic = Buffer.concat([Buffer.alloc(4), Buffer.from('ftyp', 'ascii'), Buffer.from('heic', 'ascii'), Buffer.alloc(4)]);
+        expect(sniffMediaType(heic)).toBe('image/heic');
+    });
+
+    // The common real-world shape: iPhone photos routinely declare the generic still-image brand as
+    // major and name 'heic' only further down the compatible list, so checking byte 8 alone misses them.
+    it('recognizes a HEIC that names heic only among its compatible brands', () => {
+        const heic = Buffer.concat([
+            Buffer.from([0x00, 0x00, 0x00, 0x18]),
+            Buffer.from('ftyp', 'ascii'),
+            Buffer.from('mif1', 'ascii'),
+            Buffer.alloc(4),
+            Buffer.from('heic', 'ascii'),
+        ]);
+        expect(sniffMediaType(heic)).toBe('image/heic');
+    });
+
+    // Same ISO container as HEIF, different codec — and one no client here produces, so it stays out
+    // rather than reaching a decoder that may not handle it.
+    it('does not accept AVIF as HEIC', () => {
+        const avif = Buffer.concat([Buffer.alloc(4), Buffer.from('ftyp', 'ascii'), Buffer.from('avif', 'ascii'), Buffer.alloc(4)]);
+        expect(sniffMediaType(avif)).toBeNull();
+    });
+
+    // The video allowlist is checked first: a file matching both is likelier to be the video it says
+    // it is than a still image.
+    it('still reads an allowlisted video brand as video, not as an image', () => {
+        const mp4 = Buffer.concat([
+            Buffer.from([0x00, 0x00, 0x00, 0x18]),
+            Buffer.from('ftyp', 'ascii'),
+            Buffer.from('isom', 'ascii'),
+            Buffer.alloc(4),
+            Buffer.from('mif1', 'ascii'),
+        ]);
+        expect(sniffMediaType(mp4)).toBe('video/mp4');
+    });
+
     it('recognizes a PDF by its %PDF- header', () => {
         expect(sniffMediaType(padTo(Buffer.from('%PDF-1.7\n', 'ascii'), 16))).toBe('application/pdf');
     });

@@ -11,6 +11,7 @@ import { FcmTokenController } from './fcm-token.controller';
 import { FcmTokenService } from './fcm-token.service';
 import { GifsController } from './gifs.controller';
 import { GiphyService } from './giphy.service';
+import { HeicTranscodeService } from './heic-transcode.service';
 import { GoogleAuthService } from './google-auth.service';
 import { InvitationsController } from './invitations.controller';
 import { InvitationsService } from './invitations.service';
@@ -74,6 +75,7 @@ import { VideoThumbnailService } from './video-thumbnail.service';
         ChatMediaService,
         PdfThumbnailService,
         VideoThumbnailService,
+        HeicTranscodeService,
         LinkPreviewService,
         GiphyService,
         SessionAuthGuard,
