@@ -183,6 +183,70 @@ add a feature at once.
 
 ---
 
+## Part 0b — URLs, room identity, and joining by QR
+
+### The room is a namespace; everything after it is app-owned
+
+```
+/rooms/:roomName                       the room itself
+/rooms/:roomName/:moduleSegment        a module's landing view      e.g. /rooms/x/files
+/rooms/:roomName/:moduleSegment/:id    one thing within it          e.g. /rooms/x/people/:userId
+```
+
+**The `/rooms/` prefix stays.** Hanging room names off the root was considered and rejected: the root
+is already occupied twice over — by routes (`share`, `update`, `playback`) and by static files served
+at `/` (`i18n/`, `push-sw.js`, `version.json`, `playback-popup-sync.js`). Room names are user-chosen
+and validation permits anything short and non-control, so `update` and `version.json` are both
+creatable names. The two layers even fail differently: the router would shadow the first, while
+Firebase serves the real file before its SPA rewrite reaches the second. Worst of all it is
+retroactive — adding any top-level route later silently steals an existing room, and the collision is
+with data, so no build-time check can catch it.
+
+Keeping one known prefix segment means everything after `:roomName` is app-owned and can never
+collide with user input. That is the property the whole hierarchy rests on.
+
+**Module segments are claimed through the registry**, which asserts uniqueness at boot, so two
+modules cannot both take `files` and find out at runtime. A segment 404s when its module is not
+enabled for that room — per-room enablement expressed directly in the URL.
+
+**`/rooms/:roomName` does not move.** It is a live contract across `fcm-notification.ts`,
+`native-push.ts` and `push-sw.js`, and cold-start notification taps now depend on it. Chat stays at
+`?openChat=1` rather than becoming a path segment; if that changes later it is an added alias plus
+all three files in one commit.
+
+### IEP rooms get an unreadable identifier and a separate display name
+
+A room called `iep-jimmy-smith` puts a child's name into browser history, access logs, referrer
+headers and screen shares. So an IEP room's *identifier* is generated, and its human-readable title
+lives beside it:
+
+- `Room.name` — generated, ~16–20 characters, **Crockford base32**. Lowercase because
+  `canonicalRoomName` lowercases everything, which would silently mangle base64url or base58 into
+  collisions and dead links; and no `0/O`/`1/l/I`, for the times somebody reads one aloud.
+- `Room.displayName` — new nullable column, what the UI shows. Never in a URL, never in a log.
+
+**Moving the name out of the URL is only half of it.** Push titles use `payload.roomName` in both
+`fcm-notification.ts` and `push-sw.js`; if that became `displayName`, the child's name would simply
+arrive on a lock screen instead. Private rooms need deliberately vague notification text — "Converge
+— new message" — rather than naming the room at all.
+
+### Joining by QR
+
+One QR **per person**, encoding that person's invitation link. Not a room-wide code: roles are
+per-person and invitations are single-use, so a shared code would admit only whoever scanned first
+and would grant them somebody else's role.
+
+**A QR shown on screen during a call is broadcast to everyone in it**, including into the recording —
+this app has screen sharing. The design survives that only because `accept()` requires the token AND
+a matching verified Google email, which makes a photographed code useless to anyone but its intended
+recipient. That is load-bearing, not incidental: **never add a "token alone admits you" shortcut.**
+
+For the same reason a QR encodes an invitation and never a passcode — the passcode path has no
+per-person binding to fall back on.
+
+The encoder is a new dependency, and the initial bundle is already over its warning budget. It loads
+inside the lazily-routed IEP module, so it never reaches the initial bundle at all.
+
 ## Part 1 — IEP session skeleton
 
 - `IepSession` scoped to a room: student identifiers, status (`draft → in_review → signing →
