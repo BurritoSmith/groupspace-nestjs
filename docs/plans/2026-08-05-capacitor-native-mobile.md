@@ -560,11 +560,61 @@ out the alternative and the bridge carries it comfortably.
   unless a `mediaProjection` service is already running. Its notification is ongoing and
   undismissable, which is right — it is the reminder that this is happening.
 
-### Still unmeasured
+### Verified on device, and the four bugs that took
 
-Real glass-to-glass latency and long-run stability, both of which need two devices in a room. The
-decode side is bounded (116ms to first frame) but the encoder, bridge and mediasoup re-encode are
-not yet measured end to end.
+Working end to end between two devices. Steady state, from the in-app counters:
+
+```
+chunks=1269  decoded=1269  written=1269  dropped=0  track=live
+```
+
+Every frame the encoder produced reached the track. Nothing dropped, which also says the
+single-in-flight write policy costs nothing in practice — mediasoup drains faster than 20fps arrives.
+
+Getting there took four bugs, and **every one of them was in code that looked obviously correct**.
+They are recorded because each is a trap the next person will otherwise walk into:
+
+1. **`startForegroundService` is asynchronous, and `onStartCommand` lands on the MAIN looper** — the
+   same thread the consent callback runs on. Doing the projection work straight after asking for the
+   service therefore completes it all *before* the service can run, and Android kills the process
+   when `startForeground` has not happened within five seconds. It crashed every attempt. The service
+   now runs a callback once it is genuinely foregrounded, and the projection work happens there —
+   which is also the order Android 14+ demands anyway.
+2. **MediaCodec emits SPS/PPS once, and does not repeat them.** Forwarding that `CODEC_CONFIG`
+   buffer as an ordinary chunk fails twice over: on its own it is not a decodable access unit, and
+   every later frame then arrives without the parameters needed to decode it. Held back and
+   prepended to every keyframe by hand — `KEY_PREPEND_HEADER_TO_SYNC_FRAMES` is API 29+ and honoured
+   inconsistently.
+3. **A MediaStreamTrackGenerator does not resolve `write()` while nothing consumes the track.**
+   Measured directly: the same code hangs outright without a consumer attached and runs perfectly
+   with one. There is always a gap between creating the track and mediasoup attaching, and firing
+   writes into it left every one pending, the stream wedged, and the frames unreleased — a black
+   stream frozen on the last decoded frame. Now at most ONE write is in flight and frames arriving
+   meanwhile are dropped and CLOSED. Dropping is correct for live video anyway; closing matters
+   because a VideoFrame holds a real decoder buffer that stalls the decoder if leaked.
+4. **Two separate reasons a second share never worked.** `screenBroadcastStopped` was emitted as a
+   RETAINED event, and Capacitor hands retained events to listeners registered afterwards — so
+   ending one share left a stop event waiting to kill the next one the instant it registered. And
+   `teardown()` calls `projection.stop()`, which fires Android's own `onStop`, so an ordinary stop
+   was announcing itself back to the app. The event is no longer retained and now fires only for
+   stops that came from OUTSIDE the app, which is the only case worth telling the web layer about.
+
+Two smaller things fell out of the same testing. `track.stop()` **does not fire `ended`** — that is
+spec behaviour, and MediaRoom calls `stop()` on every give-up path, so listening only for `ended`
+left the projection orphaned; `stop()` is wrapped instead. And listeners must be attached BEFORE the
+encoder is started, or the opening keyframe is emitted into a void and nothing decodes until the
+next one — invisible on a first share, fatal on the second. Both are pinned by tests.
+
+The keyframe interval is 1 second rather than 2: cheap on mostly-static screen content, and it halves
+the worst case for anyone joining mid-share.
+
+**The counters stay in.** One log line every five seconds while sharing, reporting chunks / decoded /
+written / dropped. A share that looks black from the far side has several possible causes that are
+indistinguishable without them, and they cut the last two bugs from guesswork to a single reading
+each.
+
+Still unmeasured: real glass-to-glass latency, which needs instrumentation at both ends rather than
+one device. The decode side is bounded at 116ms to first frame.
 
 ## Phase 2 — complete
 
@@ -573,7 +623,8 @@ Every item in this plan has now shipped. Screen share was the last.
 ## Open questions for the user
 
 - **Native transcode output size** — see the 2x note above.
-- **Screen-share latency end to end**, which needs two devices in a room to measure.
+- **Screen-share glass-to-glass latency**, which needs instrumentation at both ends rather than one
+  device. Everything else about the feature is verified working between two devices.
 - **The chevron fix** (`user-settings-dialog.scss`) was a pre-existing defect, not native-only.
   Worth confirming the web build's settings dialog was showing "chev" too.
 
