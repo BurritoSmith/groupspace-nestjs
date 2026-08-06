@@ -9,8 +9,20 @@ datasource db {
 
 model User {
   id             String   @id @default(uuid())
-  googleSub      String   @unique
-  email          String
+  // Null for a guest — someone admitted to a private room by passcode rather than by signing in.
+  // Nullable rather than a second identity table because the alternative is a polymorphic foreign
+  // key threaded through RoomMember, ChatMessage, ChatMessageReaction and every audit row; one
+  // nullable column is cheaper than that everywhere. Postgres treats multiple NULLs as distinct
+  // within a unique index, so any number of guests coexist under the @unique below.
+  googleSub      String?  @unique
+  // Null for a guest too: a passcode join collects a display name and nothing else. Anything that
+  // emails a user must therefore check for null rather than assuming an address exists.
+  email          String?
+  // 'google' | 'guest'. Denormalized from "is googleSub null" so a guard can answer "is this a
+  // verified identity" without a join, and so the session JWT can carry it — see the capability
+  // resolver, which refuses guests the sensitive capabilities (notably iep:view-executed, which
+  // must not be reachable by whoever happened to have the room passcode).
+  authKind       String   @default("google")
   displayName    String
   pictureUrl     String
   createdAt      DateTime @default(now())
@@ -19,13 +31,17 @@ model User {
   // (UsersService.upsertFromGoogleProfile never touches it on an update), so it's a permanent
   // record of how someone originally got in, not something a later re-invite would overwrite.
 
-  chatMessages      ChatMessage[]
-  chatReactions     ChatMessageReaction[]
-  recordings        Recording[]
-  settings          UserSetting[]
-  roomMemberships   RoomMember[]
-  pushSubscriptions PushSubscription[]
-  fcmTokens         FcmToken[]
+  chatMessages       ChatMessage[]
+  chatReactions      ChatMessageReaction[]
+  recordings         Recording[]
+  settings           UserSetting[]
+  roomMemberships    RoomMember[]
+  pushSubscriptions  PushSubscription[]
+  fcmTokens          FcmToken[]
+  createdRooms       Room[]                 @relation("RoomCreator")
+  moduleRoles        RoomMemberModuleRole[]
+  invitationsSent    RoomInvitation[]       @relation("RoomInvitationInviter")
+  invitationsClaimed RoomInvitation[]       @relation("RoomInvitationAcceptor")
 }
 
 // Generic per-user preference storage — every user setting (starting with the microphone
@@ -57,22 +73,41 @@ model Invitation {
 }
 
 model Room {
-  name      String   @id // rooms have no separate UUID anywhere in this app — the name IS the identifier
-  createdAt DateTime @default(now())
+  name            String   @id // rooms have no separate UUID anywhere in this app — the name IS the identifier
+  createdAt       DateTime @default(now())
+  // Nullable only because every room predating explicit creation has no recorded creator. The
+  // migration backfills it from the earliest member, but a room whose members were all deleted has
+  // no honest answer, and inventing one would be worse than admitting it. Always set going forward:
+  // RoomService.create is now the only thing that makes a Room row.
+  createdByUserId String?
+  createdBy       User?    @relation("RoomCreator", fields: [createdByUserId], references: [id])
+  // 'public' | 'private'. Public is what every room was before this existed, and is what the
+  // backfill assigns, so nothing that worked stops working. Private rooms admit a member only by
+  // RoomInvitation or by passcode.
+  //
+  // Not purely the owner's choice: a module may declare requiresPrivate, and enabling one that does
+  // forces this to 'private' and refuses to let it back to 'public' while that module is enabled —
+  // see RoomService. That is how "an IEP room is private" is enforced rather than merely expected.
+  visibility      String   @default("public")
+  // Argon2/bcrypt digest, never the passcode itself and never returned to a client. Null means the
+  // room has no passcode, which for a private room means invitation is the only way in.
+  passcodeHash    String?
 
   chatMessages      ChatMessage[]
   recordings        Recording[]
   recordingSessions RecordingSession[]
   members           RoomMember[]
+  modules           RoomModule[]
+  invitations       RoomInvitation[]
+  moduleRoles       RoomMemberModuleRole[]
 }
 
 // Scaffolding for a lightweight, permission-free "has this user ever been in this room" concept —
 // seeded for pre-existing rooms by backfilling distinct (userId, roomName) pairs out of ChatMessage
 // history (see the migration SQL). Drives two things for now: the join-room screen's "rooms you've
 // visited before" typeahead, and push-notification eligibility (RecordingService/PushNotification
-// only ever notify a room's members, never a stranger who's never been in it). Deliberately no
-// permissions/roles here yet — just enough structure to build that on top of later without another
-// migration.
+// only ever notify a room's members, never a stranger who's never been in it). The permissions this
+// was left room for now exist — see `role` below.
 model RoomMember {
   id            String   @id @default(uuid())
   userId        String
@@ -81,10 +116,102 @@ model RoomMember {
   room          Room     @relation(fields: [roomName], references: [name])
   firstJoinedAt DateTime @default(now())
   lastJoinedAt  DateTime @updatedAt
+  // 'owner' | 'moderator' | 'member' | 'guest' — GOVERNANCE only: what you may do to the ROOM.
+  // Deliberately a small fixed set that knows nothing about any module, so that adding a module
+  // never widens it. Who you are within a module's process is a different question with a different
+  // answer, stored in RoomMemberModuleRole.
+  //
+  // Defaults to 'member', which is also what the backfill gives everyone except the earliest member
+  // of each existing room, who becomes its 'owner'.
+  role          String   @default("member")
 
   @@unique([userId, roomName])
   @@index([userId])
   @@index([roomName])
+}
+
+// Which modules a room has switched on. A table rather than a JSON column on Room so that "every
+// room with the IEP module enabled" is a query rather than a scan, and so each module owns its own
+// config blob without any two of them sharing a document.
+//
+// chat/live/playback are listed here too, but only as DATA: the room records that they are on and
+// the create step toggles them, while their code stays where it is and reads a flag. Actually
+// rehoming them into the module system is a separate piece of work, and doing it here would have
+// swamped this one.
+model RoomModule {
+  id        String   @id @default(uuid())
+  roomName  String
+  room      Room     @relation(fields: [roomName], references: [name])
+  // Matches the id in the frontend module registry: 'chat' | 'live' | 'playback' | 'iep'.
+  moduleId  String
+  config    Json     @default("{}")
+  enabledAt DateTime @default(now())
+
+  @@unique([roomName, moduleId])
+  @@index([moduleId])
+}
+
+// Who you are inside one module's process, as opposed to what you may do to the room.
+//
+// `role` is a plain string whose vocabulary belongs to the module and is validated by it — IEP uses
+// 'administrator' | 'parent' | 'student' | 'instructor' | 'observer'. Keeping it open is what lets a
+// new module ship without touching this schema at all: it adds rows, never columns or enum values.
+// It is also what lets the person who created the room not be the IEP administrator, which is the
+// normal case and cannot be expressed with a single role per member.
+model RoomMemberModuleRole {
+  id       String @id @default(uuid())
+  roomName String
+  room     Room   @relation(fields: [roomName], references: [name])
+  userId   String
+  user     User   @relation(fields: [userId], references: [id])
+  moduleId String
+  role     String
+
+  assignedAt DateTime @default(now())
+
+  // One role per person per module. Someone needing two roles in one process (a parent who is also
+  // an instructor at the same school, say) is a real situation, but it wants deliberate handling in
+  // the module rather than two rows that every capability check would have to reconcile.
+  @@unique([roomName, userId, moduleId])
+  @@index([roomName, moduleId])
+  @@index([userId])
+}
+
+// An invitation into one room, carrying the roles the invitee will hold when they accept.
+//
+// NOT to be confused with `Invitation` above, which is the global app-signup gate — a code that
+// gets you an account at all. This is per-room and per-person. The two were nearly given the same
+// name, and anything that conflates them will hand out the wrong kind of access.
+//
+// Roles ride along on the invitation because an IEP meeting is convened before anyone joins: the
+// administrator knows the parent's address and what they are to the process days ahead, and a
+// meeting that opens with everyone unroled while the facilitator does admin is a worse meeting.
+model RoomInvitation {
+  id               String    @id @default(uuid())
+  roomName         String
+  room             Room      @relation(fields: [roomName], references: [name])
+  // Matched case-insensitively against the VERIFIED email in the Google ID token, and only when
+  // that token says email_verified. Bound to a userId on first accept and matched by id from then
+  // on — a Workspace address can be reassigned to a different person, and an invitation that stayed
+  // keyed on the string would follow the address rather than the human.
+  email            String
+  roomRole         String    @default("member")
+  // { moduleId: role } for every module the invitee has a part in, applied atomically on accept.
+  moduleRoles      Json      @default("{}")
+  // Unguessable, single-use, and the only thing the invitation link carries. Hashing it would be
+  // better still; it is stored plain here because it is short-lived and revocable, and the room it
+  // opens is itself access-controlled — revisit if invitations ever become long-lived.
+  token            String    @unique
+  invitedByUserId  String
+  invitedBy        User      @relation("RoomInvitationInviter", fields: [invitedByUserId], references: [id])
+  acceptedByUserId String?
+  acceptedBy       User?     @relation("RoomInvitationAcceptor", fields: [acceptedByUserId], references: [id])
+  acceptedAt       DateTime?
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+
+  @@index([roomName])
+  @@index([email])
 }
 
 // One registered Web Push endpoint for one browser/device install. `deviceId` is client-minted
@@ -224,25 +351,25 @@ model ChatMessageReaction {
 }
 
 model Recording {
-  id           String           @id @default(uuid())
-  roomName     String
-  room         Room             @relation(fields: [roomName], references: [name])
-  sessionId    String
-  session      RecordingSession @relation(fields: [sessionId], references: [id])
-  userId       String? // nullable — the combined-audio-mix row has no single owning participant
-  user         User?            @relation(fields: [userId], references: [id])
-  displayName  String // snapshot; literal 'mixed-audio' for the audio-mix row
-  streamType   String // 'webcam' | 'screen' | 'mic' | 'camera' — plain String, not a Prisma enum: RecordingService
+  id                 String           @id @default(uuid())
+  roomName           String
+  room               Room             @relation(fields: [roomName], references: [name])
+  sessionId          String
+  session            RecordingSession @relation(fields: [sessionId], references: [id])
+  userId             String? // nullable — the combined-audio-mix row has no single owning participant
+  user               User?            @relation(fields: [userId], references: [id])
+  displayName        String // snapshot; literal 'mixed-audio' for the audio-mix row
+  streamType         String // 'webcam' | 'screen' | 'mic' | 'camera' — plain String, not a Prisma enum: RecordingService
   // already treats these as plain string literals, an enum would add migration overhead for no benefit here.
   // 'camera' is a single file combining one participant's mic AND webcam (see
   // RecordingService.startCombinedCameraSession) — used instead of separate 'mic'/'webcam' rows
   // whenever both are already active together, for frame-accurate native A/V sync at playback.
-  streamNumber Int
-  filename     String
-  gcsPath      String? // <roomName>/<sessionName>/<filename> in RECORDINGS_GCS_BUCKET, when configured
+  streamNumber       Int
+  filename           String
+  gcsPath            String? // <roomName>/<sessionName>/<filename> in RECORDINGS_GCS_BUCKET, when configured
   // (production/GCP only — local dev keeps writing to disk and leaves this null). Set to the deterministic
   // intended path regardless of upload success — see gcsUploadedAt for whether it's actually there yet.
-  gcsUploadedAt DateTime? // null until the GCS upload actually succeeds. Distinguishes "gcsPath is the intended
+  gcsUploadedAt      DateTime? // null until the GCS upload actually succeeds. Distinguishes "gcsPath is the intended
   // path" from "confirmed present in the bucket" — playback serves the local VM file until this is set, then
   // hands off to the signed GCS URL. Stays null forever in local dev (no bucket configured).
   thumbnailStatus    String? // 'live' | 'final' — plain String, matching streamType's own convention over a
@@ -250,9 +377,9 @@ model Recording {
   // attempt, or extraction failed), or permanently null for streamType 'mic' (no thumbnail concept).
   thumbnailUpdatedAt DateTime? // set every time the thumbnail file is (re)written. Doubles as the cache-busting
   // query param on the thumbnail URL (the derived filename is identical across the grayscale->color swap).
-  startedAt    DateTime         @default(now())
-  stoppedAt    DateTime? // null until finalizeVideoSession/finalizeAudioMix runs
-  hasContent   Boolean          @default(true) // false when remux found the temp recording missing/empty or
+  startedAt          DateTime         @default(now())
+  stoppedAt          DateTime? // null until finalizeVideoSession/finalizeAudioMix runs
+  hasContent         Boolean          @default(true) // false when remux found the temp recording missing/empty or
   // itself failed — i.e. the producer never emitted a keyframe (a separate, already-diagnosed browser/encoder
   // issue) or the stream was stopped before any data was captured. stoppedAt is still set either way (it did
   // stop), but a false here means there's no real file at the URL buildPlaybackUrls would otherwise construct —
