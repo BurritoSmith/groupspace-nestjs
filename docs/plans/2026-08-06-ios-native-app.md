@@ -117,8 +117,21 @@ rather than reasoning about it. The equivalent check is one line in the WKWebVie
 and on the simulator:
 
 ```js
-typeof window.MediaStreamTrackGenerator; typeof window.VideoDecoder;
+({MediaStreamTrackGenerator: typeof window.MediaStreamTrackGenerator, VideoDecoder: typeof window.VideoDecoder, EncodedVideoChunk: typeof window.EncodedVideoChunk})
 ```
+
+**Measured 2026-08-06.** iPhone 17 Pro simulator, iOS 26.5, Safari Web Inspector attached to the
+WKWebView of the debug build. Verbatim:
+
+```
+{MediaStreamTrackGenerator: "undefined", VideoDecoder: "function", EncodedVideoChunk: "function"}
+typeof window.VideoEncoder  →  "function"
+```
+
+The prediction above holds: **the generator is absent, and WebCodecs is complete** — encode and
+decode both present, exactly the split bug 241124 describes. The gap is not codec access; it is that
+there is no way to hand a frame back to WebRTC as a track. Still to confirm on a real device, though
+a WebKit feature flag is unlikely to differ from the simulator.
 
 If the generator is genuinely absent, there are three ways out, in rising cost:
 
@@ -150,8 +163,9 @@ it after whichever of the two forces that decision first.
 
 ## Open questions
 
-- Is `MediaStreamTrackGenerator` present in WKWebView on a current iOS? Everything in Part 3 hangs
-  off this.
+- ~~Is `MediaStreamTrackGenerator` present in WKWebView on a current iOS? Everything in Part 3 hangs
+  off this.~~ **Answered 2026-08-06: no.** Absent on iOS 26.5 (simulator); WebCodecs present. See the
+  measurement above. Device confirmation outstanding.
 - Is foreground-only screen sharing worth shipping on iOS if the generator is absent, or is no
   feature better than a misleading one?
 - Should `Package.swift` be gitignored? Recommended above, but it is a repo-convention call.
