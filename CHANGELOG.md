@@ -11,6 +11,16 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.14] - 2026-08-06
+
+### Added
+
+- Let iPhone photos through, by converting them on the way in ([#57](https://github.com/BurritoSmith/groupspace-nestjs/pull/57))
+
+### Changed
+
+- Bring the plan doc up to date with what shipped and what is next
+
 ## [0.27.13] - 2026-08-05
 
 ### Added
@@ -448,7 +458,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.13...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.14...HEAD
+[0.27.14]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.13...v0.27.14
 [0.27.13]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.12...v0.27.13
 [0.27.12]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.11...v0.27.12
 [0.27.11]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.10...v0.27.11
