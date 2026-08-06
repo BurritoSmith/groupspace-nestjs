@@ -22,6 +22,7 @@ import { LinkPreviewService, extractFirstUrl } from './link-preview.service';
 import { PushNotificationService } from './push-notification.service';
 import { RecordingService } from './recording.service';
 import { RoomMembershipService } from './room-membership.service';
+import { canonicalRoomName } from './room-name';
 import { RoomService } from './room.service';
 import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
@@ -257,7 +258,11 @@ export class RoomGateway implements OnGatewayDisconnect {
      *  normalizing here alone is sufficient for the whole app. Pulled out as its own method so
      *  this is testable without exercising the rest of onJoinRoom's session/Google-auth logic. */
     private normalizeRoomName(raw: string | undefined): string {
-        const normalized = raw?.trim().toLowerCase() ?? '';
+        // The rule itself now lives in room-name.ts, because rooms can be created over REST too and
+        // a second copy of "trim and lowercase" would eventually disagree with this one. What stays
+        // here is the socket-shaped reaction to an empty name — a shared helper cannot pick between
+        // a WsException and a 400.
+        const normalized = canonicalRoomName(raw);
         if (!normalized) {
             throw new WsException('A room name is required.');
         }
