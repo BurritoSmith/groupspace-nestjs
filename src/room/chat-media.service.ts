@@ -3,7 +3,8 @@ import { Storage } from '@google-cloud/storage';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { sniffedTypeMatchesDeclared, sniffMediaType } from './file-sniff';
+import { SniffedMediaType, sniffedTypeMatchesDeclared, sniffMediaType } from './file-sniff';
+import { HeicTranscodeService } from './heic-transcode.service';
 import { IChatAttachment } from './interfaces/room.interfaces';
 import { PdfThumbnailService } from './pdf-thumbnail.service';
 import { VideoThumbnailService } from './video-thumbnail.service';
@@ -12,9 +13,13 @@ export interface IUploadedChatMedia {
     url: string;
     storagePath: string | null;
     mimeType: string;
+    /** Size of what was actually STORED, which isn't the uploaded buffer's length when a HEIC was
+     *  transcoded on the way in — the controller reports this to clients, and reporting the
+     *  original's size would describe a file nobody will ever download. */
+    sizeBytes: number;
 }
 
-const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic']);
 
 const DEFAULT_MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 const DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024;
@@ -82,6 +87,7 @@ export class ChatMediaService {
     constructor(
         private readonly pdfThumbnails: PdfThumbnailService,
         private readonly videoThumbnails: VideoThumbnailService,
+        private readonly heicTranscoder: HeicTranscodeService,
     ) {}
 
     /** Validates (magic-byte sniff, not the client's claimed Content-Type/filename), then uploads
@@ -95,25 +101,45 @@ export class ChatMediaService {
         const isImage = IMAGE_TYPES.has(sniffed);
         const isPdf = sniffed === 'application/pdf';
         const cap = isImage ? this.maxImageBytes : isPdf ? this.maxPdfBytes : this.maxVideoBytes;
+        // Checked against the UPLOADED bytes, before any transcode below — the cap exists to bound
+        // what a request may cost this process, and a HEIC has already cost its full size by the
+        // time it gets here regardless of how small it re-encodes to.
         if (buffer.length > cap) {
             throw new PayloadTooLargeException(`File exceeds the ${isImage ? 'image' : isPdf ? 'pdf' : 'video'} size limit`);
         }
 
-        const objectPath = `${this.sanitize(roomName)}/${new Date().getUTCFullYear()}/${String(new Date().getUTCMonth() + 1).padStart(2, '0')}/${randomUUID()}.${EXTENSION_BY_MIME_TYPE[sniffed]}`;
+        // HEIC never reaches storage as itself — see HeicTranscodeService. From here on storedType
+        // and storedBuffer are what actually gets written, and for every other format they're just
+        // the sniffed type and the original bytes.
+        let storedType: SniffedMediaType = sniffed;
+        let storedBuffer = buffer;
+        if (sniffed === 'image/heic') {
+            const jpeg = await this.heicTranscoder.toJpeg(buffer);
+            if (!jpeg) {
+                // 415 rather than a 500: from the client's side this is indistinguishable from any
+                // other file we can't accept, and it's the honest answer when the decoder is missing
+                // (local dev) as much as when the file is corrupt.
+                throw new UnsupportedMediaTypeException('Could not convert this HEIC image');
+            }
+            storedType = 'image/jpeg';
+            storedBuffer = jpeg;
+        }
+
+        const objectPath = `${this.sanitize(roomName)}/${new Date().getUTCFullYear()}/${String(new Date().getUTCMonth() + 1).padStart(2, '0')}/${randomUUID()}.${EXTENSION_BY_MIME_TYPE[storedType]}`;
 
         if (this.storage && this.gcsBucketName) {
-            await this.storage.bucket(this.gcsBucketName).file(objectPath).save(buffer, {
-                contentType: sniffed,
+            await this.storage.bucket(this.gcsBucketName).file(objectPath).save(storedBuffer, {
+                contentType: storedType,
                 resumable: false,
                 metadata: { cacheControl: 'public, max-age=31536000, immutable' },
             });
-            return { url: `${this.publicBase}${objectPath}`, storagePath: objectPath, mimeType: sniffed };
+            return { url: `${this.publicBase}${objectPath}`, storagePath: objectPath, mimeType: storedType, sizeBytes: storedBuffer.length };
         }
 
         const localPath = path.join(this.localDir, objectPath);
         await fs.mkdir(path.dirname(localPath), { recursive: true });
-        await fs.writeFile(localPath, buffer);
-        return { url: `${this.publicBase}${objectPath}`, storagePath: null, mimeType: sniffed };
+        await fs.writeFile(localPath, storedBuffer);
+        return { url: `${this.publicBase}${objectPath}`, storagePath: null, mimeType: storedType, sizeBytes: storedBuffer.length };
     }
 
     /**

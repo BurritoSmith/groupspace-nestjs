@@ -12,6 +12,7 @@ jest.mock('@google-cloud/storage', () => ({ Storage: MockStorage }));
 // Imported after the mock so ChatMediaService's module-level `new Storage()` call (inside its
 // instance field initializer) picks up the mock, not the real @google-cloud/storage client.
 import { ChatMediaService } from './chat-media.service';
+import { HeicTranscodeService } from './heic-transcode.service';
 import { IChatAttachment } from './interfaces/room.interfaces';
 import { PdfThumbnailService } from './pdf-thumbnail.service';
 import { VideoThumbnailService } from './video-thumbnail.service';
@@ -28,12 +29,28 @@ const fakeVideoThumbnails = {
     readImageDimensions: jest.fn().mockResolvedValue(null),
 } as unknown as VideoThumbnailService;
 
+// Same reasoning again — defaults to "the decoder couldn't read it", which is what every test not
+// specifically about HEIC wants, since none of them upload one.
+const fakeHeicTranscoder = { toJpeg: jest.fn().mockResolvedValue(null) } as unknown as HeicTranscodeService;
+
 function createService(): ChatMediaService {
-    return new ChatMediaService(fakePdfThumbnails, fakeVideoThumbnails);
+    return new ChatMediaService(fakePdfThumbnails, fakeVideoThumbnails, fakeHeicTranscoder);
 }
 
 function jpegBuffer(totalBytes = 100): Buffer {
     const header = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    return Buffer.concat([header, Buffer.alloc(Math.max(0, totalBytes - header.length))]);
+}
+
+/** An ISO base media file whose ftyp names `heic` — the shape of an iPhone photo, as far as the
+ *  sniffer is concerned. */
+function heicBuffer(totalBytes = 100): Buffer {
+    const header = Buffer.concat([
+        Buffer.from([0x00, 0x00, 0x00, 0x18]), // ftyp box size
+        Buffer.from('ftypheic', 'ascii'),
+        Buffer.from([0x00, 0x00, 0x00, 0x00]), // minor version
+        Buffer.from('mif1', 'ascii'), // one compatible brand
+    ]);
     return Buffer.concat([header, Buffer.alloc(Math.max(0, totalBytes - header.length))]);
 }
 
@@ -93,6 +110,55 @@ describe('ChatMediaService', () => {
             const service = createService();
 
             expect(service.publicBase).toBe('https://storage.googleapis.com/test-chat-media-bucket/');
+        });
+
+        describe('HEIC uploads', () => {
+            const transcoded = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(20)]);
+
+            it('stores the transcoded JPEG rather than the HEIC it was given', async () => {
+                (fakeHeicTranscoder.toJpeg as jest.Mock).mockResolvedValue(transcoded);
+                const service = createService();
+                const original = heicBuffer();
+
+                const result = await service.uploadAttachment(original, 'lobby', 'image/heic');
+
+                expect(fakeHeicTranscoder.toJpeg).toHaveBeenCalledWith(original);
+                expect(mockSave).toHaveBeenCalledWith(transcoded, expect.objectContaining({ contentType: 'image/jpeg' }));
+                expect(result.mimeType).toBe('image/jpeg');
+                expect(result.storagePath).toMatch(/\.jpg$/);
+            });
+
+            // The controller reports this to every client as the attachment's size. Reporting the
+            // HEIC's length would describe a file nobody can download — the stored object is the JPEG.
+            it('reports the size of what was stored, not of the uploaded original', async () => {
+                (fakeHeicTranscoder.toJpeg as jest.Mock).mockResolvedValue(transcoded);
+                const service = createService();
+
+                const result = await service.uploadAttachment(heicBuffer(5000), 'lobby', 'image/heic');
+
+                expect(result.sizeBytes).toBe(transcoded.length);
+            });
+
+            // Not best-effort, unlike the thumbnail services: storing an undisplayable original would
+            // put an image in the chat that most clients can't render, which is worse than refusing it.
+            it('rejects the upload when the file cannot be decoded, storing nothing', async () => {
+                (fakeHeicTranscoder.toJpeg as jest.Mock).mockResolvedValue(null);
+                const service = createService();
+
+                await expect(service.uploadAttachment(heicBuffer(), 'lobby', 'image/heic')).rejects.toBeInstanceOf(UnsupportedMediaTypeException);
+                expect(mockSave).not.toHaveBeenCalled();
+            });
+
+            // The cap bounds what one request may cost this process, and those bytes have already been
+            // read by the time the transcode happens — so it's checked before, against the original.
+            it('applies the image size cap to the uploaded HEIC, before any transcode', async () => {
+                process.env.CHAT_MEDIA_MAX_IMAGE_BYTES = '1000';
+                (fakeHeicTranscoder.toJpeg as jest.Mock).mockResolvedValue(transcoded);
+                const service = createService();
+
+                await expect(service.uploadAttachment(heicBuffer(2000), 'lobby', 'image/heic')).rejects.toBeInstanceOf(PayloadTooLargeException);
+                expect(fakeHeicTranscoder.toJpeg).not.toHaveBeenCalled();
+            });
         });
     });
 

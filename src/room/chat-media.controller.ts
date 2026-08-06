@@ -53,7 +53,9 @@ export class ChatMediaController {
             width: pdfThumbnail?.width ?? parseOptionalPositiveInt(width),
             height: pdfThumbnail?.height ?? parseOptionalPositiveInt(height),
             durationMs: parseOptionalPositiveInt(durationMs),
-            sizeBytes: file.buffer.length,
+            // What was stored, not what was uploaded — a HEIC is transcoded to JPEG on the way in,
+            // and the original's size describes a file no client will ever fetch.
+            sizeBytes: uploaded.sizeBytes,
             name: file.originalname ? file.originalname.slice(0, 255) : null,
         };
         return { attachment };
