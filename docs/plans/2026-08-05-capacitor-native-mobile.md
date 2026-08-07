@@ -462,6 +462,38 @@ in a WeakMap rather than widening every attachment type.
 
 Every native video entry point now yields a path: the picker, a share, and the camera.
 
+### The numbers, on iOS — the opposite answer
+
+Measured the same way once `VideoTranscoderPlugin.swift` landed: iPhone SE (3rd gen), one 72.06MB
+`.mov` straight off the camera, three runs each, both tiers back to back in the same WKWebView.
+
+| tier | time | output | saving |
+|---|---|---|---|
+| web (WebCodecs) | 0.1s | — | **failed 3/3** |
+| native (AVAssetWriter) | **2.1s** | 7.78MB | 89% |
+
+**The web tier does not lose on iOS, it never runs.** Every attempt dies immediately with
+`TypeError: Body is disturbed or locked`, thrown out of mediabunny's `BlobSource` — which reads the
+file through a `Response` body that WebKit will not hand over. The first measurement of this was
+suspect, because the benchmark re-used a `File` the attach pipeline had already consumed; handing
+each run a freshly re-read `File` changed nothing, so it is not re-entrancy.
+
+So the ordering is inverted per platform, and `prefersNativeTranscode()` is where that lives:
+
+- **Android** — WebCodecs first. It produces roughly half the bytes at the same speed (3.6MB vs
+  7.6MB, 4.8s vs 4.3s), and native is the failsafe for clips too large to hold in WebView memory.
+- **iOS** — native only. The web tier is skipped outright rather than attempted and caught, because
+  attempting it bought nothing but ~0.1s and a console error on every video upload.
+
+Worth noting the native encoder behaves better here than on Android: 89% off a 72MB source against
+83% off 43.5MB, and faster in absolute terms on a bigger file. The bitrate overshoot that made
+Android's native output twice the size of WebCodecs' does not appear — `AVAssetWriter` honours
+`AVVideoAverageBitRateKey` far more closely than Media3 honoured its request.
+
+The benchmark ran through a temporary long-press hook on the composer's attach button, reporting
+into an `alert()` rather than the console — Safari's Web Inspector could not attach to the device.
+It is not committed, matching the Android hook; recreating it is a ten-minute job.
+
 ### The numbers
 
 Galaxy S10+ (SM-G975U1, Snapdragon 855), one 43.5MB / 30s / 1080p H.264 source, all three tiers back
