@@ -8,3 +8,6 @@ add-giphy-key-to-vm.ps1
 recordings/
 chat-media/
 .claude/settings.local.json
+
+# The local development Postgres cluster (scripts/local-db.mjs) — data, never source.
+/.local-db/
