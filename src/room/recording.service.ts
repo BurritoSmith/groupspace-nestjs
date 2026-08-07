@@ -967,10 +967,20 @@ export class RecordingService {
                 keyframeTimer = setInterval(() => void consumer.requestKeyFrame().catch(() => undefined), KEYFRAME_RETRY_MS);
             }
 
-            timeoutTimer = setTimeout(
-                () => finish(new Error(`No recording data received within ${START_VERIFY_TIMEOUT_MS}ms`)),
-                START_VERIFY_TIMEOUT_MS,
-            );
+            timeoutTimer = setTimeout(() => {
+                // Which half failed is otherwise unknowable from the logs, and the two have nothing
+                // in common: either mediasoup never sent (paused producer, no keyframe, dead
+                // consumer) or it sent and ffmpeg never received (port bound late, wrong port,
+                // dropped). packetCount answers that in one number, and a timeout is rare enough
+                // that asking for stats on the way out costs nothing.
+                Promise.resolve(typeof consumer.getStats === 'function' ? consumer.getStats() : [])
+                    .then((stats) => {
+                        const sent = stats.map((s) => `${s.type} packets=${'packetCount' in s ? s.packetCount : '?'} bytes=${'byteCount' in s ? s.byteCount : '?'}`).join('; ');
+                        this.logger.warn(`[recording-timeout] consumer ${consumer.id} kind=${consumer.kind} paused=${consumer.paused} producerPaused=${consumer.producerPaused} — ${sent || 'no stats'}`);
+                    })
+                    .catch(() => undefined)
+                    .finally(() => finish(new Error(`No recording data received within ${START_VERIFY_TIMEOUT_MS}ms`)));
+            }, START_VERIFY_TIMEOUT_MS);
         });
     }
 
