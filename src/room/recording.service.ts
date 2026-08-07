@@ -75,6 +75,24 @@ interface IPlaybackUrlSourceRow {
  * Consumers with no action needed here, so one combined recording spans the
  * whole camera-toggle history of a session with no re-syncing ever required.
  */
+
+/**
+ * The producer went away before this recording ever saw data — the camera switched off, or the
+ * recording stopped, inside the verification window.
+ *
+ * Its own type because it is the one start failure that must NOT be retried. The retry policy
+ * exists for transient faults (a port lost to a race, a stalled ffmpeg) where a fresh port and a
+ * fresh transport genuinely help. A closed producer is not transient: every remaining attempt
+ * fails instantly with "Producer not found", so a user toggling their camera off after a few
+ * seconds produced three warnings and an ERROR describing a fault that never happened.
+ */
+export class ProducerGoneError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'ProducerGoneError';
+    }
+}
+
 @Injectable()
 export class RecordingService {
     private readonly logger = new Logger(RecordingService.name);
@@ -426,9 +444,15 @@ export class RecordingService {
             // into that already-launched ffmpeg process — see the class doc comment. It gets its
             // own independent 'webcam' file, exactly like today, falling through below.
         }
-        void this.startVideoSession(state, router, producer).catch((error: unknown) =>
-            this.logger.error(`Failed to start recording ${producer.source} producer ${producer.producerId} in room ${roomName}: ${error}`),
-        );
+        void this.startVideoSession(state, router, producer).catch((error: unknown) => {
+            // Already reported at log level by the attempt loop, and it describes a user action
+            // rather than a fault. Raising it to ERROR here would put a stack-trace-shaped line in
+            // the log for someone switching their camera off.
+            if (error instanceof ProducerGoneError) {
+                return;
+            }
+            this.logger.error(`Failed to start recording ${producer.source} producer ${producer.producerId} in room ${roomName}: ${error}`);
+        });
     }
 
     /** Fire-and-forget hook for a closing producer — webcam, screen, or mic. No-op if there's no
@@ -709,6 +733,11 @@ export class RecordingService {
                     ffmpeg.kill('SIGKILL');
                 }
                 void fs.unlink(this.tempRecordingPath(outputPath)).catch(() => undefined);
+                if (error instanceof ProducerGoneError) {
+                    // Not a fault, and not retryable — see ProducerGoneError.
+                    this.logger.log(`Recording of ${info.source} for producer ${info.producerId} stopped before any data arrived: ${error.message}`);
+                    throw error;
+                }
                 this.logger.warn(
                     `Recording start attempt ${attempt}/${MAX_ATTEMPTS} failed for producer ${info.producerId} (port=${destPort}): ${error instanceof Error ? error.message : error}`,
                 );
@@ -881,6 +910,11 @@ export class RecordingService {
                     ffmpeg.kill('SIGKILL');
                 }
                 void fs.unlink(this.tempRecordingPath(outputPath)).catch(() => undefined);
+                if (error instanceof ProducerGoneError) {
+                    // Not a fault, and not retryable — see ProducerGoneError.
+                    this.logger.log(`Combined camera recording for peer ${micInfo.peerId} stopped before any data arrived: ${error.message}`);
+                    throw error;
+                }
                 this.logger.warn(
                     `Combined camera session start attempt ${attempt}/${MAX_ATTEMPTS} failed for peer ${micInfo.peerId}: ${error instanceof Error ? error.message : error}`,
                 );
@@ -933,6 +967,7 @@ export class RecordingService {
                 if (keyframeTimer) {
                     clearInterval(keyframeTimer);
                 }
+                consumer.off?.('producerclose', onProducerClose);
                 if (error) {
                     reject(error);
                 } else {
@@ -950,6 +985,17 @@ export class RecordingService {
             // 500 — an earlier version of this comment credited -flush_packets 1 for that, which
             // was simply wrong (matroskaenc buffers a whole cluster before AVIO ever sees it) and
             // cost every recording ~5s of startup until it was measured.
+            // The camera being switched off, or the recording stopped, mid-verification. Not a
+            // transient fault: waiting out the remaining window cannot help, and the retries above
+            // are guaranteed to fail with "Producer not found" — which is what turned "you turned
+            // your camera off after four seconds" into three warnings and an ERROR.
+            const onProducerClose = () => finish(new ProducerGoneError(`Producer closed while waiting for ${consumer.kind} data`));
+            if (consumer.closed) {
+                finish(new ProducerGoneError(`Producer already closed before ${consumer.kind} verification began`));
+                return;
+            }
+            consumer.once?.('producerclose', onProducerClose);
+
             let lastSize: number | null = null;
             pollTimer = setInterval(() => {
                 fs.stat(tempPath)
