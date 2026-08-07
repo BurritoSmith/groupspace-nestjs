@@ -976,7 +976,17 @@ export class RecordingService {
                 Promise.resolve(typeof consumer.getStats === 'function' ? consumer.getStats() : [])
                     .then((stats) => {
                         const sent = stats.map((s) => `${s.type} packets=${'packetCount' in s ? s.packetCount : '?'} bytes=${'byteCount' in s ? s.byteCount : '?'}`).join('; ');
-                        this.logger.warn(`[recording-timeout] consumer ${consumer.id} kind=${consumer.kind} paused=${consumer.paused} producerPaused=${consumer.producerPaused} — ${sent || 'no stats'}`);
+                        // score.producerScore is the part that matters when packets=0: it reports
+                        // how well the SFU is RECEIVING from the browser. Zero packets out with a
+                        // healthy producerScore means the consumer is the problem; zero with a dead
+                        // producerScore means the browser was never sending, and no amount of
+                        // consumer-side fixing would have helped.
+                        const score = consumer.score as { score?: number; producerScore?: number; producerScores?: number[] } | undefined;
+                        this.logger.warn(
+                            `[recording-timeout] consumer ${consumer.id} kind=${consumer.kind} paused=${consumer.paused} producerPaused=${consumer.producerPaused} ` +
+                                `score=${score?.score ?? '?'} producerScore=${score?.producerScore ?? '?'} producerScores=[${(score?.producerScores ?? []).join(',')}] ` +
+                                `currentLayers=${JSON.stringify(consumer.currentLayers ?? null)} preferredLayers=${JSON.stringify(consumer.preferredLayers ?? null)} — ${sent || 'no stats'}`,
+                        );
                     })
                     .catch(() => undefined)
                     .finally(() => finish(new Error(`No recording data received within ${START_VERIFY_TIMEOUT_MS}ms`)));
