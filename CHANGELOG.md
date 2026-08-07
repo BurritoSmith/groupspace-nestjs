@@ -11,6 +11,24 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.28.0] - 2026-08-07
+
+### Added
+
+- Give rooms an owner, a door, and a list of what they contain ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+- Ask what someone may do, not what they are called ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+- Give room names and passcodes one implementation each ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+- Make rooms something someone creates, and owns ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+- Put a door on a room, and a way to be let through it ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+- Decide what a URL says about a child ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+- Stop a defaulted constructor parameter from killing the app at boot ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+- Write down where this epic actually is ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+- Put the door on the path people actually walk through ([#61](https://github.com/BurritoSmith/groupspace-nestjs/pull/61))
+
+### Changed
+
+- Record the iOS transcode benchmark beside Android's ([#66](https://github.com/BurritoSmith/groupspace-nestjs/pull/66))
+
 ## [0.27.15] - 2026-08-07
 
 ### Fixed
@@ -478,7 +496,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.15...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.15...v0.28.0
 [0.27.15]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.14...v0.27.15
 [0.27.14]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.13...v0.27.14
 [0.27.13]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.12...v0.27.13
