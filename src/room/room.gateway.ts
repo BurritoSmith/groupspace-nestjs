@@ -22,6 +22,8 @@ import { LinkPreviewService, extractFirstUrl } from './link-preview.service';
 import { PushNotificationService } from './push-notification.service';
 import { RecordingService } from './recording.service';
 import { RoomMembershipService } from './room-membership.service';
+import { canonicalRoomName } from './room-name';
+import { RoomProvisioningService } from './room-provisioning.service';
 import { RoomService } from './room.service';
 import { SessionService } from './session.service';
 import { TurnCredentialsService } from './turn-credentials.service';
@@ -45,6 +47,19 @@ import type {
     ISetConsumerQualityPayload,
     ISetFocusPayload,
 } from './interfaces/room.interfaces';
+
+/**
+ * Refusing a private room to someone who is not in it.
+ *
+ * Matched verbatim by the frontend to tell "you need the passcode" from any other join failure, the
+ * same way the session-expired message above is — so changing this string is a breaking change
+ * across both repos, not a copy edit.
+ *
+ * Says only that the room is private. It deliberately does not distinguish "no such room" from "you
+ * are not in it": both answers, to someone who is not a member, are a membership oracle about a
+ * child's education. The REST layer's invitation and capability errors take the same line.
+ */
+export const PRIVATE_ROOM_REFUSAL = 'This room is private. You need a passcode or an invitation to join it.';
 
 @WebSocketGateway({
     namespace: 'room',
@@ -74,6 +89,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         private readonly chatReactionService: ChatReactionService,
         private readonly roomMembershipService: RoomMembershipService,
         private readonly pushNotificationService: PushNotificationService,
+        private readonly roomProvisioningService: RoomProvisioningService,
     ) {
         this.roomService.events.on('active-speakers', ({ roomName, peerIds }: { roomName: string; peerIds: string[] }) => {
             this.server.to(roomName).emit('active-speakers', { peerIds });
@@ -190,6 +206,34 @@ export class RoomGateway implements OnGatewayDisconnect {
         void socket.leave(closed.roomName);
     }
 
+    /**
+     * The door, on the path people actually walk through.
+     *
+     * `POST /rooms/:roomName/join` verifies a passcode and records membership, but nothing on the
+     * live join path calls it — a client goes straight to `join-room` on this socket. Without this
+     * check the passcode is a setting that is stored, displayed and enforced nowhere: a second user
+     * who simply knows the room name walks into a private room. For an IEP room that is the whole
+     * confidentiality premise of the epic, so the socket has to ask the same question REST does.
+     *
+     * Deliberately BEFORE `recordVisit` further down, which upserts a RoomMember row. Run after it,
+     * this check would pass for everyone — the act of joining would create the membership that
+     * proves you were allowed to join.
+     *
+     * A room with no row yet is let through, which is the pre-existing silent-create path
+     * (`recordVisit`'s `connectOrCreate`). Closing that is a separate change with its own blast
+     * radius; refusing here would break every client still joining a room that has never existed.
+     */
+    private async assertMayJoin(roomName: string, userId: string): Promise<void> {
+        const summary = await this.roomProvisioningService.describe(roomName);
+        if (!summary || summary.visibility !== 'private') {
+            return;
+        }
+        const context = await this.roomProvisioningService.contextFor(roomName, userId);
+        if (!context) {
+            throw new WsException(PRIVATE_ROOM_REFUSAL);
+        }
+    }
+
     @SubscribeMessage('join-room')
     async onJoinRoom(@ConnectedSocket() socket: Socket, @MessageBody() payload: IJoinRoomPayload) {
         let userId: string;
@@ -226,6 +270,7 @@ export class RoomGateway implements OnGatewayDisconnect {
         const sessionToken = this.sessionService.issue(userId);
 
         const roomName = this.normalizeRoomName(payload.roomName);
+        await this.assertMayJoin(roomName, userId);
         const result = await this.roomService.joinRoom(socket.id, roomName, userId, displayName, pictureUrl);
         await socket.join(roomName);
         socket.data.roomName = roomName;
@@ -257,7 +302,11 @@ export class RoomGateway implements OnGatewayDisconnect {
      *  normalizing here alone is sufficient for the whole app. Pulled out as its own method so
      *  this is testable without exercising the rest of onJoinRoom's session/Google-auth logic. */
     private normalizeRoomName(raw: string | undefined): string {
-        const normalized = raw?.trim().toLowerCase() ?? '';
+        // The rule itself now lives in room-name.ts, because rooms can be created over REST too and
+        // a second copy of "trim and lowercase" would eventually disagree with this one. What stays
+        // here is the socket-shaped reaction to an empty name — a shared helper cannot pick between
+        // a WsException and a 400.
+        const normalized = canonicalRoomName(raw);
         if (!normalized) {
             throw new WsException('A room name is required.');
         }

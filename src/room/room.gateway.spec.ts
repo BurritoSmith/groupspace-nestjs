@@ -1,5 +1,5 @@
 import { IChatAttachment } from './interfaces/room.interfaces';
-import { RoomGateway } from './room.gateway';
+import { PRIVATE_ROOM_REFUSAL, RoomGateway } from './room.gateway';
 
 describe('RoomGateway', () => {
     let gateway: RoomGateway;
@@ -19,6 +19,7 @@ describe('RoomGateway', () => {
     let fakeChatReactionService: { toggle: jest.Mock; listGrouped: jest.Mock };
     let fakeRoomMembershipService: { recordVisit: jest.Mock; listMembersWithProfile: jest.Mock };
     let fakePushNotificationService: { notifyChatMessage: jest.Mock; notifyPeerJoined: jest.Mock };
+    let fakeRoomProvisioningService: { describe: jest.Mock; contextFor: jest.Mock };
 
     beforeEach(() => {
         const fakeEventEmitter = { events: { on: jest.fn() } };
@@ -48,6 +49,10 @@ describe('RoomGateway', () => {
         fakeChatReactionService = { toggle: jest.fn().mockResolvedValue(undefined), listGrouped: jest.fn().mockResolvedValue([]) };
         fakeRoomMembershipService = { recordVisit: jest.fn().mockResolvedValue(undefined), listMembersWithProfile: jest.fn().mockResolvedValue([]) };
         fakePushNotificationService = { notifyChatMessage: jest.fn().mockResolvedValue(undefined), notifyPeerJoined: jest.fn().mockResolvedValue(undefined) };
+        // Defaults to a room with no row of its own — the pre-Part-0 shape every existing test in
+        // this file is implicitly about, which assertMayJoin lets straight through. The private-room
+        // tests below override describe().
+        fakeRoomProvisioningService = { describe: jest.fn().mockResolvedValue(null), contextFor: jest.fn().mockResolvedValue(null) };
         gateway = new RoomGateway(
             fakeRoomService as never, // roomService
             {} as never, // turnCredentialsService
@@ -62,6 +67,7 @@ describe('RoomGateway', () => {
             fakeChatReactionService as never, // chatReactionService
             fakeRoomMembershipService as never, // roomMembershipService
             fakePushNotificationService as never, // pushNotificationService
+            fakeRoomProvisioningService as never, // roomProvisioningService
         );
         emitSpy = jest.fn();
         toSpy = jest.fn().mockReturnValue({ emit: emitSpy });
@@ -714,6 +720,7 @@ describe('RoomGateway', () => {
                 {} as never, // chatReactionService
                 fakeRoomMembershipService as never, // roomMembershipService
                 fakePushNotificationService as never, // pushNotificationService
+                fakeRoomProvisioningService as never, // roomProvisioningService
             );
 
             const result = await localGateway.onGetRecordingSession({ id: 'session-1' });
@@ -743,6 +750,7 @@ describe('RoomGateway', () => {
                 {} as never, // chatReactionService
                 fakeRoomMembershipService as never, // roomMembershipService
                 fakePushNotificationService as never, // pushNotificationService
+                fakeRoomProvisioningService as never, // roomProvisioningService
             );
 
             const result = await localGateway.onGetRecordingSession({ id: 'missing' });
@@ -771,6 +779,54 @@ describe('RoomGateway', () => {
         it('throws for empty/whitespace-only input', () => {
             expect(() => call('')).toThrow('A room name is required.');
             expect(() => call('   ')).toThrow('A room name is required.');
+        });
+    });
+    /*
+     * The socket is the door people actually walk through. `POST /rooms/:roomName/join` verifies
+     * passcodes, but nothing on the live path calls it — so before this gate existed, a second user
+     * who merely knew the name walked straight into a private room with a passcode set on it.
+     */
+    describe('assertMayJoin', () => {
+        function assertMayJoin(roomName: string, userId: string): Promise<void> {
+            return (gateway as unknown as { assertMayJoin: (r: string, u: string) => Promise<void> }).assertMayJoin(roomName, userId);
+        }
+
+        it('lets anyone into a public room without asking who they are', async () => {
+            fakeRoomProvisioningService.describe.mockResolvedValue({ name: 'lobby', visibility: 'public', hasPasscode: false });
+
+            await expect(assertMayJoin('lobby', 'user-1')).resolves.toBeUndefined();
+            expect(fakeRoomProvisioningService.contextFor).not.toHaveBeenCalled();
+        });
+
+        // The pre-Part-0 silent-create path. Refusing here would lock out every client still
+        // joining a room that has never existed; closing it is a separate change.
+        it('lets a room that has no row of its own through', async () => {
+            fakeRoomProvisioningService.describe.mockResolvedValue(null);
+
+            await expect(assertMayJoin('brand-new', 'user-1')).resolves.toBeUndefined();
+        });
+
+        it('refuses a private room to someone who is not a member', async () => {
+            fakeRoomProvisioningService.describe.mockResolvedValue({ name: 'iep-room', visibility: 'private', hasPasscode: true });
+            fakeRoomProvisioningService.contextFor.mockResolvedValue(null);
+
+            await expect(assertMayJoin('iep-room', 'stranger')).rejects.toThrow(PRIVATE_ROOM_REFUSAL);
+        });
+
+        it('admits a member of a private room, who already proved a passcode or an invitation', async () => {
+            fakeRoomProvisioningService.describe.mockResolvedValue({ name: 'iep-room', visibility: 'private', hasPasscode: true });
+            fakeRoomProvisioningService.contextFor.mockResolvedValue({ roomRole: 'member', authKind: 'google', moduleRoles: {} });
+
+            await expect(assertMayJoin('iep-room', 'user-1')).resolves.toBeUndefined();
+        });
+
+        /* A passcode with no membership is not a key. Membership is what the REST join records
+         * after verifying one, and it is the only thing this gate accepts. */
+        it('refuses even when the room has a passcode set, if the caller is not a member', async () => {
+            fakeRoomProvisioningService.describe.mockResolvedValue({ name: 'iep-room', visibility: 'private', hasPasscode: true });
+            fakeRoomProvisioningService.contextFor.mockResolvedValue(null);
+
+            await expect(assertMayJoin('iep-room', 'knows-the-name')).rejects.toThrow(PRIVATE_ROOM_REFUSAL);
         });
     });
 });

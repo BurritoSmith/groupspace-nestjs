@@ -16,7 +16,13 @@ import { GoogleAuthService } from './google-auth.service';
 import { InvitationsController } from './invitations.controller';
 import { InvitationsService } from './invitations.service';
 import { LinkPreviewService } from './link-preview.service';
+import { MODULE_CATALOG } from './module-manifest';
+import { MODULE_CATALOG_VALUE } from '../modules/module-registry';
 import { PdfThumbnailService } from './pdf-thumbnail.service';
+import { PasscodeAttempts } from './passcode-attempts';
+import { RoomCapabilityGuard } from './room-capability.guard';
+import { RoomInvitationService } from './room-invitation.service';
+import { RoomProvisioningService } from './room-provisioning.service';
 import { PushNotificationService } from './push-notification.service';
 import { PushSubscriptionController } from './push-subscription.controller';
 import { PushSubscriptionService } from './push-subscription.service';
@@ -62,6 +68,14 @@ import { VideoThumbnailService } from './video-thumbnail.service';
         AppUpdateController,
     ],
     providers: [
+        // The module catalog, injected rather than imported by anything under src/room — which is
+        // what lets the room layer provision an IEP room without ever naming one. src/modules/
+        // module-registry.ts is the only file that knows the full list.
+        { provide: MODULE_CATALOG, useValue: MODULE_CATALOG_VALUE },
+        RoomProvisioningService,
+        RoomInvitationService,
+        RoomCapabilityGuard,
+        PasscodeAttempts,
         RoomGateway,
         RoomService,
         TurnCredentialsService,
