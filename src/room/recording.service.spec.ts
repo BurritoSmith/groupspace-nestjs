@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { RecordingService } from './recording.service';
+import { ProducerGoneError, RecordingService } from './recording.service';
 import { IRecordingVideoSession, IRoomRecordingState } from './interfaces/recording.interfaces';
 
 function createFakePrisma() {
@@ -602,6 +602,57 @@ describe('RecordingService', () => {
         });
     });
 
+    // The retry policy is for transient faults — a port lost to a race, a stalled ffmpeg — where a
+    // fresh port and transport genuinely help. A producer that has gone away is not one: every
+    // remaining attempt fails instantly with "Producer not found", which is how switching a camera
+    // off after a few seconds produced three warnings and an ERROR.
+    describe('a start that fails because the producer went away', () => {
+        it('does not retry, unlike every other start failure', async () => {
+            const scratchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'recording-noretry-'));
+            const recordingService = new RecordingService(createFakePrisma() as never);
+            Object.assign(recordingService as unknown as { sdpScratchDir: string; recordingsDir: string }, {
+                sdpScratchDir: scratchDir,
+                recordingsDir: scratchDir,
+            });
+
+            const router = {
+                createPlainTransport: jest.fn().mockResolvedValue({
+                    connect: jest.fn().mockResolvedValue(undefined),
+                    consume: jest.fn().mockResolvedValue({
+                        rtpParameters: { codecs: [{ mimeType: 'video/VP8', payloadType: 101, clockRate: 90000 }] },
+                        resume: jest.fn().mockResolvedValue(undefined),
+                        requestKeyFrame: jest.fn().mockResolvedValue(undefined),
+                        close: jest.fn(),
+                    }),
+                    close: jest.fn(),
+                }),
+            };
+            const internals = recordingService as unknown as {
+                spawnFfmpegAndWaitReady: jest.Mock;
+                waitForRecordingToStart: jest.Mock;
+                startVideoSession: (state: unknown, router: unknown, info: unknown) => Promise<void>;
+            };
+            internals.spawnFfmpegAndWaitReady = jest.fn().mockResolvedValue({ exitCode: null, signalCode: null, kill: jest.fn() });
+            internals.waitForRecordingToStart = jest.fn().mockRejectedValue(new ProducerGoneError('Producer closed while waiting for video data'));
+
+            const state = {
+                roomName: 'honey',
+                sessionDbId: 'session-1',
+                videoSessions: new Map(),
+                cameraSessions: new Map(),
+                streamNumberCounters: new Map(),
+                pendingFinalizations: new Set(),
+            };
+
+            await expect(
+                internals.startVideoSession(state, router, { producerId: 'producer-1', peerId: 'peer-1', userId: 'user-1', displayName: 'Clay', source: 'webcam' }),
+            ).rejects.toThrow(ProducerGoneError);
+
+            expect(internals.spawnFfmpegAndWaitReady).toHaveBeenCalledTimes(1);
+            await fs.rm(scratchDir, { recursive: true, force: true });
+        });
+    });
+
     describe('waitForRecordingToStart — failsafe for a producer that spawns fine but never delivers data', () => {
         type WaitFn = (tempPath: string, consumer: { requestKeyFrame: jest.Mock }, requestKeyframes: boolean) => Promise<void>;
         let tempPath: string;
@@ -657,6 +708,52 @@ describe('RecordingService', () => {
             await jest.advanceTimersByTimeAsync(15_000);
 
             await assertion;
+        });
+
+        // Switching the camera off, or stopping the recording, inside the verification window. The
+        // window is 15s and a producer can easily outlive less than that, which used to mean
+        // waiting out the whole timeout and then burning two more attempts against a producer that
+        // no longer existed — three warnings and an ERROR for a user action.
+        describe('a producer that goes away mid-verification', () => {
+            function consumerWithEvents() {
+                const handlers = new Map<string, () => void>();
+                return {
+                    kind: 'video',
+                    closed: false,
+                    requestKeyFrame: jest.fn().mockResolvedValue(undefined),
+                    once: jest.fn((event: string, handler: () => void) => handlers.set(event, handler)),
+                    off: jest.fn((event: string) => handlers.delete(event)),
+                    emit: (event: string) => handlers.get(event)?.(),
+                };
+            }
+
+            it('gives up as soon as the producer closes, rather than waiting out the window', async () => {
+                const consumer = consumerWithEvents();
+                const promise = callWait(consumer as never, true);
+                const assertion = expect(promise).rejects.toThrow(/Producer closed while waiting/);
+
+                await jest.advanceTimersByTimeAsync(3000); // nowhere near the 15s timeout
+                consumer.emit('producerclose');
+
+                await assertion;
+            });
+
+            it('does not wait at all when the producer was already gone', async () => {
+                const consumer = { ...consumerWithEvents(), closed: true };
+                await expect(callWait(consumer as never, true)).rejects.toThrow(/already closed/);
+            });
+
+            // The listener must come off with everything else, or a later close on a consumer this
+            // promise no longer owns settles something that already settled.
+            it('detaches its listener once verification succeeds', async () => {
+                const consumer = consumerWithEvents();
+                const promise = callWait(consumer as never, true);
+
+                await writeHeaderThenMedia();
+                await promise;
+
+                expect(consumer.off).toHaveBeenCalledWith('producerclose', expect.any(Function));
+            });
         });
 
         it('re-requests a keyframe periodically (video) while waiting for data to arrive', async () => {
