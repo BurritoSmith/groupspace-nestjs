@@ -11,3 +11,6 @@ chat-media/
 
 # The local development Postgres cluster (scripts/local-db.mjs) — data, never source.
 /.local-db/
+
+# macOS Finder droppings.
+.DS_Store
