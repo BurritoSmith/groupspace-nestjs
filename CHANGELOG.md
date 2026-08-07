@@ -11,6 +11,26 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.27.15] - 2026-08-07
+
+### Fixed
+
+- Stop treating a switched-off camera as a recording fault ([#65](https://github.com/BurritoSmith/groupspace-nestjs/pull/65))
+
+### Changed
+
+- Bring the native mobile plan up to date with what actually shipped ([#58](https://github.com/BurritoSmith/groupspace-nestjs/pull/58))
+- Record the reversed compression tier order in the plan ([#58](https://github.com/BurritoSmith/groupspace-nestjs/pull/58))
+- Record screen share, and close out the native mobile plan ([#59](https://github.com/BurritoSmith/groupspace-nestjs/pull/59))
+- Record what device testing taught the screen-share work ([#59](https://github.com/BurritoSmith/groupspace-nestjs/pull/59))
+- Add the iOS plan, mirrored from the frontend ([#60](https://github.com/BurritoSmith/groupspace-nestjs/pull/60))
+- Measure what WKWebView can do, instead of predicting it ([#60](https://github.com/BurritoSmith/groupspace-nestjs/pull/60))
+- Run a Postgres from node_modules, for machines that have none ([#62](https://github.com/BurritoSmith/groupspace-nestjs/pull/62))
+- Supply an ffmpeg to machines that have none ([#63](https://github.com/BurritoSmith/groupspace-nestjs/pull/63))
+- Stop tracking .DS_Store
+- Say which half failed when a recording never starts ([#64](https://github.com/BurritoSmith/groupspace-nestjs/pull/64))
+- Report the producer's health too when a recording never starts ([#64](https://github.com/BurritoSmith/groupspace-nestjs/pull/64))
+
 ## [0.27.14] - 2026-08-06
 
 ### Added
@@ -458,7 +478,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.14...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.15...HEAD
+[0.27.15]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.14...v0.27.15
 [0.27.14]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.13...v0.27.14
 [0.27.13]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.12...v0.27.13
 [0.27.12]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.11...v0.27.12
