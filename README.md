@@ -13,8 +13,15 @@ npx prisma migrate deploy     # apply migrations locally too, not just at deploy
 npm run start:dev             # :3001
 ```
 
-Needs a `.env` with at least `DATABASE_URL`. Secrets live only in `.env` files and on the VM — never
-in the frontend, and never in a commit.
+Needs a `.env` with at least `DATABASE_URL` and `SESSION_JWT_SECRET` — copy `.env.example` and read
+the comments there. Secrets live only in `.env` files and on the VM — never in the frontend, and
+never in a commit.
+
+**No Postgres on the machine?** `npm run db:local` runs one out of `node_modules`, no Homebrew,
+Docker or admin password needed. It listens on **55432**, not 5432, so it cannot collide with a
+Postgres that is already installed — a machine with its own just points `DATABASE_URL` at that and
+never runs this. The cluster persists in a gitignored `.local-db/`. Run it in one terminal and
+`npm run start:dev` in another, and apply migrations once with `npx prisma migrate deploy`.
 
 ```bash
 npm test                      # Jest
