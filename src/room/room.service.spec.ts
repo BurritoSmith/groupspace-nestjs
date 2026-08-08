@@ -1,4 +1,4 @@
-import { RoomService } from './room.service';
+import { RoomService, planWorkerPorts } from './room.service';
 import { IPeerState } from './interfaces/room.interfaces';
 
 function seedRouter(target: RoomService, roomName: string): void {
@@ -317,5 +317,275 @@ describe('RoomService', () => {
 
             expect(result.recordingStartedAt).toBeNull();
         });
+    });
+});
+
+/**
+ * The pool's whole safety property is that no two workers can be handed the same port. mediasoup
+ * tracks port usage per Worker, so an overlap is not caught anywhere at runtime — it surfaces as an
+ * intermittent bind failure under load, which is the worst possible way to find out.
+ */
+describe('planWorkerPorts', () => {
+    /** Production today: 40000-40199 from deploy/.env.example. */
+    const PROD_MIN = 40000;
+    const PROD_MAX = 40199;
+
+    it('never overlaps two workers, whatever the inputs', () => {
+        for (const cpus of [1, 2, 4, 8, 16]) {
+            for (const [min, max] of [
+                [PROD_MIN, PROD_MAX],
+                [10000, 10199],
+                [40000, 41999],
+                [1000, 1099],
+            ]) {
+                const ranges = planWorkerPorts(cpus, min, max);
+                for (let i = 1; i < ranges.length; i += 1) {
+                    expect(ranges[i].minPort).toBeGreaterThan(ranges[i - 1].maxPort);
+                }
+                expect(ranges[0].minPort).toBe(min);
+                // The last slice absorbs the remainder, so the configured range — which has to match
+                // the firewall rule — is fully used and never exceeded.
+                expect(ranges[ranges.length - 1].maxPort).toBe(max);
+            }
+        }
+    });
+
+    it('gives production two workers on its 200-port range', () => {
+        expect(planWorkerPorts(8, PROD_MIN, PROD_MAX)).toEqual([
+            { minPort: 40000, maxPort: 40099 },
+            { minPort: 40100, maxPort: 40199 },
+        ]);
+    });
+
+    // Ports are a hard external limit — the firewall rule has to match — so they cap the pool even
+    // on a machine with cores to spare. Running out of ports fails a join; running out of
+    // parallelism only makes things slower.
+    it('is capped by the port range rather than the CPU count', () => {
+        expect(planWorkerPorts(32, PROD_MIN, PROD_MAX)).toHaveLength(2);
+    });
+
+    it('never returns fewer than one worker, even for a range too small to slice', () => {
+        expect(planWorkerPorts(8, 40000, 40009)).toEqual([{ minPort: 40000, maxPort: 40009 }]);
+    });
+
+    it('uses no more workers than there are CPUs, since a worker is single-threaded', () => {
+        expect(planWorkerPorts(1, 40000, 41999)).toHaveLength(1);
+        expect(planWorkerPorts(3, 40000, 41999)).toHaveLength(3);
+    });
+
+    it('honours an explicit override, but still not past what the ports afford', () => {
+        expect(planWorkerPorts(1, 40000, 41999, 4)).toHaveLength(4);
+        expect(planWorkerPorts(1, PROD_MIN, PROD_MAX, 16)).toHaveLength(2);
+    });
+
+    it('ignores a nonsensical override rather than producing zero workers', () => {
+        expect(planWorkerPorts(4, PROD_MIN, PROD_MAX, 0)).toHaveLength(2);
+        expect(planWorkerPorts(4, PROD_MIN, PROD_MAX, -1)).toHaveLength(2);
+    });
+});
+
+/**
+ * Routers used to live until the process restarted — created on first join, never closed. A server
+ * that had seen a thousand rooms held a thousand Routers and their observers, and the worker pool's
+ * least-loaded placement decayed into meaninglessness because every count only ever rose.
+ */
+describe('RoomService — releasing an empty room', () => {
+    let service: RoomService;
+    let stop: jest.Mock;
+    let router: { close: jest.Mock };
+    let slot: { routers: number };
+
+    function internals() {
+        return service as unknown as {
+            peers: Map<string, IPeerState>;
+            routersByRoom: Map<string, unknown>;
+            slotByRoom: Map<string, unknown>;
+            audioLevelObserversByRoom: Map<string, unknown>;
+        };
+    }
+
+    function seedPeer(peerId: string, roomName: string): void {
+        internals().peers.set(peerId, {
+            peerId,
+            userId: `user-${peerId}`,
+            displayName: 'Clay',
+            pictureUrl: '',
+            micSelfMuted: false,
+            focused: true,
+            roomName,
+            router: {} as never,
+            sendTransport: null,
+            recvTransport: null,
+            producers: new Map(),
+            consumers: new Map(),
+        });
+    }
+
+    beforeEach(() => {
+        stop = jest.fn().mockResolvedValue(undefined);
+        router = { close: jest.fn() };
+        slot = { routers: 1 };
+        service = new RoomService({
+            isRecording: jest.fn().mockReturnValue(false),
+            getRecordingStartedAt: jest.fn().mockReturnValue(null),
+            notifyProducerClosing: jest.fn(),
+            stop,
+        } as never);
+        internals().routersByRoom.set('honey', router);
+        internals().slotByRoom.set('honey', slot);
+        internals().audioLevelObserversByRoom.set('honey', {});
+    });
+
+    it('closes the router once the last peer leaves, and hands the load back', async () => {
+        seedPeer('peer-1', 'honey');
+
+        service.closePeer('peer-1');
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(router.close).toHaveBeenCalledTimes(1);
+        expect(internals().routersByRoom.has('honey')).toBe(false);
+        expect(internals().audioLevelObserversByRoom.has('honey')).toBe(false);
+        // Without this the pool keeps placing new rooms as though this one were still here.
+        expect(slot.routers).toBe(0);
+    });
+
+    it('keeps the router while anyone is still in the room', async () => {
+        seedPeer('peer-1', 'honey');
+        seedPeer('peer-2', 'honey');
+
+        service.closePeer('peer-1');
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(router.close).not.toHaveBeenCalled();
+        expect(internals().routersByRoom.has('honey')).toBe(true);
+    });
+
+    /** The close runs AFTER an awaited recording stop, so there is a real window in which someone
+     *  can rejoin. Closing then would pull the router out from under them. */
+    it('does not close the router when someone rejoins while the recording is being finalized', async () => {
+        seedPeer('peer-1', 'honey');
+        let finishStop: () => void = () => undefined;
+        stop.mockReturnValue(new Promise<void>((resolve) => { finishStop = resolve; }));
+
+        service.closePeer('peer-1');
+        seedPeer('peer-2', 'honey'); // rejoined mid-finalization
+        finishStop();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(router.close).not.toHaveBeenCalled();
+        expect(internals().routersByRoom.has('honey')).toBe(true);
+    });
+
+    /** stop() is best-effort; a failure there must not strand the router forever. */
+    it('still releases the router when stopping the recording rejects', async () => {
+        seedPeer('peer-1', 'honey');
+        stop.mockRejectedValue(new Error('ffmpeg went away'));
+        jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+
+        service.closePeer('peer-1');
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(router.close).toHaveBeenCalledTimes(1);
+    });
+});
+
+/**
+ * Creating a Router is real I/O, so "get or create" has an await in the middle of it — and anything
+ * with an await in the middle of a check-then-act can run twice.
+ */
+describe('RoomService: two people joining one empty room at once', () => {
+    interface IProbeSlot {
+        worker: { createRouter: jest.Mock };
+        listenInfos: unknown[];
+        routers: number;
+    }
+
+    function serviceWithPool(slots: number): { service: RoomService; pool: IProbeSlot[]; built: { closed: boolean }[] } {
+        const built: { closed: boolean }[] = [];
+        const service = new RoomService({
+            isRecording: () => false,
+            getRecordingStartedAt: () => null,
+            stop: async () => undefined,
+            notifyProducerClosing: () => undefined,
+        } as never);
+        const pool: IProbeSlot[] = Array.from({ length: slots }, () => ({
+            worker: {
+                createRouter: jest.fn(async () => {
+                    // The delay is the point: without it there is no window to race in.
+                    await new Promise((resolve) => setTimeout(resolve, 5));
+                    const router = {
+                        closed: false,
+                        close: jest.fn(function (this: { closed: boolean }) {
+                            this.closed = true;
+                        }),
+                        createAudioLevelObserver: jest.fn(async () => ({ on: jest.fn() })),
+                        rtpCapabilities: {},
+                    };
+                    built.push(router);
+                    return router;
+                }),
+            },
+            listenInfos: [],
+            routers: 0,
+        }));
+        (service as unknown as { workers: IProbeSlot[] }).workers.push(...pool);
+        return { service, pool, built };
+    }
+
+    function peerRouters(service: RoomService): unknown[] {
+        const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
+        return [...peers.values()].map((peer) => peer.router);
+    }
+
+    /* Both joiners used to get past the routersByRoom check, build a Router each, and end up on
+     * DIFFERENT ones — in the same room, unable to see or hear each other. */
+    it('puts both peers on one router', async () => {
+        const { service, built } = serviceWithPool(2);
+
+        await Promise.all([
+            service.joinRoom('peer-a', 'lobby', 'user-a', 'A', ''),
+            service.joinRoom('peer-b', 'lobby', 'user-b', 'B', ''),
+        ]);
+
+        expect(built).toHaveLength(1);
+        const [routerA, routerB] = peerRouters(service);
+        expect(routerA).toBe(routerB);
+    });
+
+    /* The second Router had nothing pointing at it, so the close-when-empty path could never find
+     * it — the very leak this pool was built to stop, surviving in the one case that creates two. */
+    it('leaves nothing open once the room empties', async () => {
+        const { service, pool, built } = serviceWithPool(2);
+        await Promise.all([
+            service.joinRoom('peer-a', 'lobby', 'user-a', 'A', ''),
+            service.joinRoom('peer-b', 'lobby', 'user-b', 'B', ''),
+        ]);
+
+        service.closePeer('peer-a');
+        service.closePeer('peer-b');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        expect(built.filter((router) => !router.closed)).toHaveLength(0);
+        // Back to zero, so least-loaded placement still means something on the next room.
+        expect(pool.map((slot) => slot.routers)).toEqual([0, 0]);
+    });
+
+    /* Claiming the slot only after createRouter resolves makes every simultaneous room see the same
+     * all-zero counts and pile onto worker 0 — round-robin with extra steps, and on one core. */
+    it('spreads simultaneous rooms across the pool', async () => {
+        const { service, pool } = serviceWithPool(2);
+
+        await Promise.all([
+            service.joinRoom('peer-a', 'lobby', 'user-a', 'A', ''),
+            service.joinRoom('peer-b', 'attic', 'user-b', 'B', ''),
+        ]);
+
+        expect(pool.map((slot) => slot.routers)).toEqual([1, 1]);
     });
 });
