@@ -1,4 +1,4 @@
-import { normalizeNativePushPlatform, normalizePushPlatform, suppressNativeDuplicates } from './push-platform';
+import { dropSilentPushIntolerant, normalizeNativePushPlatform, normalizePushPlatform, suppressNativeDuplicates } from './push-platform';
 
 describe('normalizePushPlatform', () => {
     it.each(['android', 'ios', 'desktop', 'web'])('accepts %s', (value) => {
@@ -54,5 +54,34 @@ describe('suppressNativeDuplicates', () => {
         const subscriptions = [androidSub, desktopSub];
         suppressNativeDuplicates(subscriptions, [{ platform: 'android' }]);
         expect(subscriptions).toEqual([androidSub, desktopSub]);
+    });
+});
+
+describe('dropSilentPushIntolerant', () => {
+    const androidSub = { id: 'a', platform: 'android' };
+    const desktopSub = { id: 'd', platform: 'desktop' };
+    const iosSub = { id: 'i', platform: 'ios' };
+    const legacySub = { id: 'l', platform: 'web' };
+
+    /**
+     * The one that matters. A content-less push (only `dismiss-all`) breaks the `userVisibleOnly`
+     * contract on iOS; WebKit revokes the subscription, the next real send gets a 410, and
+     * PushNotificationService.send() deletes the row — so the user's notifications stop for good
+     * with the toggle still reading "on".
+     */
+    it('drops iOS, which loses its subscription over a push that shows nothing', () => {
+        expect(dropSilentPushIntolerant([androidSub, desktopSub, iosSub])).toEqual([androidSub, desktopSub]);
+    });
+
+    // push-sw.js's show-then-close placeholder is enough for these, so cross-device dismissal is
+    // unchanged everywhere except iOS.
+    it('keeps every other platform, including the un-backfilled default', () => {
+        expect(dropSilentPushIntolerant([androidSub, desktopSub, legacySub])).toEqual([androidSub, desktopSub, legacySub]);
+    });
+
+    it('does not mutate the array it was given', () => {
+        const subscriptions = [androidSub, iosSub];
+        dropSilentPushIntolerant(subscriptions);
+        expect(subscriptions).toEqual([androidSub, iosSub]);
     });
 });

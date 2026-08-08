@@ -387,6 +387,42 @@ describe('PushNotificationService', () => {
             expect(fakeFcmTokens.listForUser).toHaveBeenCalledWith('user-1', 'device-1');
             expect(fakeFcm.send).toHaveBeenCalledWith('fcm-token-2', { type: 'dismiss-all' });
         });
+
+        /**
+         * `dismiss-all` is the only payload that shows the user nothing, and iOS answers a
+         * content-less push by revoking the subscription — which send() then finishes off by
+         * deleting the row on the resulting 410. Tidying up a stale notification is not worth
+         * silently ending someone's notifications, so iOS is skipped on this path only.
+         */
+        it('never sends the silent dismiss-all to an iOS subscription', async () => {
+            const { service, fakePushSubscriptions } = createService();
+            configure(service);
+            fakePushSubscriptions.listForUser.mockResolvedValue([
+                { id: 'sub-ios', endpoint: 'https://web.push.apple.com/x', p256dh: 'p', auth: 'a', platform: 'ios' },
+                { id: 'sub-android', endpoint: 'https://fcm.googleapis.com/y', p256dh: 'p', auth: 'a', platform: 'android' },
+            ]);
+
+            await service.dismissOtherDevices('user-1', 'device-1');
+
+            expect(webpush.sendNotification).toHaveBeenCalledTimes(1);
+            expect(webpush.sendNotification).toHaveBeenCalledWith({ endpoint: 'https://fcm.googleapis.com/y', keys: { p256dh: 'p', auth: 'a' } }, JSON.stringify({ type: 'dismiss-all' }));
+        });
+    });
+
+    /** The counterpart to the skip above: iOS is dropped from `dismiss-all` and nothing else. A
+     *  chat notification is user-visible, so it honours the userVisibleOnly contract and must keep
+     *  reaching iPhones — a broader filter would have quietly disabled the whole feature there. */
+    it('still sends visible notifications to an iOS subscription', async () => {
+        const { service, fakePushSubscriptions, fakeRoomMembership, fakeUserSettings } = createService();
+        configure(service);
+        fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2' }]);
+        fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+        fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-ios', endpoint: 'https://web.push.apple.com/x', p256dh: 'p', auth: 'a', platform: 'ios' }]);
+
+        await service.notifyChatMessage('room-1', 'user-1', 'Ada', 'hello', 'msg-1', new Set());
+
+        expect(webpush.sendNotification).toHaveBeenCalledTimes(1);
+        expect(webpush.sendNotification).toHaveBeenCalledWith({ endpoint: 'https://web.push.apple.com/x', keys: { p256dh: 'p', auth: 'a' } }, expect.stringContaining('"type":"chat-message"'));
     });
 
     describe('announceAppUpdate', () => {
