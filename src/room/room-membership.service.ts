@@ -32,7 +32,12 @@ export class RoomMembershipService {
             where: { userId_roomName: { userId, roomName } },
             create: {
                 user: { connect: { id: userId } },
-                room: { connectOrCreate: { where: { name: roomName }, create: { name: roomName } } },
+                // `connect`, NOT connectOrCreate. This upsert is how every ownerless room in the
+                // database was made: recording a visit quietly created whatever room had been
+                // visited, so a room came into existence by being typed rather than by anybody
+                // deciding to make one. The gateway refuses an unknown room before this runs, so a
+                // missing room here is a bug rather than a case to paper over.
+                room: { connect: { name: roomName } },
             },
             /*
              * Written explicitly, NOT left to `@updatedAt`.

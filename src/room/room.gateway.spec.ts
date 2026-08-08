@@ -1,5 +1,5 @@
 import { IChatAttachment } from './interfaces/room.interfaces';
-import { PRIVATE_ROOM_REFUSAL, RoomGateway } from './room.gateway';
+import { NO_SUCH_ROOM_REFUSAL, PRIVATE_ROOM_REFUSAL, RoomGateway } from './room.gateway';
 
 describe('RoomGateway', () => {
     let gateway: RoomGateway;
@@ -798,12 +798,24 @@ describe('RoomGateway', () => {
             expect(fakeRoomProvisioningService.contextFor).not.toHaveBeenCalled();
         });
 
-        // The pre-Part-0 silent-create path. Refusing here would lock out every client still
-        // joining a room that has never existed; closing it is a separate change.
-        it('lets a room that has no row of its own through', async () => {
+        /*
+         * Was "lets a room that has no row of its own through", which was the pre-Part-0
+         * silent-create path: recordVisit conjured the room, so visiting a URL created it. Refusing
+         * here is what finally stops a typed or shared `/rooms/whatever` walking past the create
+         * step.
+         */
+        it('refuses a room that does not exist, rather than letting it be conjured', async () => {
             fakeRoomProvisioningService.describe.mockResolvedValue(null);
 
-            await expect(assertMayJoin('brand-new', 'user-1')).resolves.toBeUndefined();
+            await expect(assertMayJoin('brand-new', 'user-1')).rejects.toThrow(NO_SUCH_ROOM_REFUSAL);
+        });
+
+        /* The same sentence as the private-room refusal would be ideal, but these are told apart by
+         * clients; what matters is that neither says whether the room EXISTS. */
+        it('does not reveal whether the room exists', async () => {
+            fakeRoomProvisioningService.describe.mockResolvedValue(null);
+
+            await expect(assertMayJoin('brand-new', 'user-1')).rejects.toThrow(/not available/);
         });
 
         it('refuses a private room to someone who is not a member', async () => {

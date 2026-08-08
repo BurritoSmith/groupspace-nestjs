@@ -11,7 +11,7 @@ function createFakePrisma() {
 
 describe('RoomMembershipService', () => {
     describe('recordVisit', () => {
-        it('upserts on the compound (userId, roomName) key, connecting or creating the room', async () => {
+        it('upserts on the compound (userId, roomName) key, connecting to a room that must already exist', async () => {
             const fakePrisma = createFakePrisma();
             const service = new RoomMembershipService(fakePrisma as never);
 
@@ -21,7 +21,9 @@ describe('RoomMembershipService', () => {
                 where: { userId_roomName: { userId: 'user-1', roomName: 'demo-room' } },
                 create: {
                     user: { connect: { id: 'user-1' } },
-                    room: { connectOrCreate: { where: { name: 'demo-room' }, create: { name: 'demo-room' } } },
+                    // `connect`, not connectOrCreate: recording a visit must not bring a room into
+                    // existence. That is how every ownerless room in the database was made.
+                    room: { connect: { name: 'demo-room' } },
                 },
                 // Was `{}`, which is what broke recency — see the test below.
                 update: { lastJoinedAt: expect.any(Date) },
