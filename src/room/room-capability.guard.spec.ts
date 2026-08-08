@@ -6,6 +6,7 @@ const catalog: IModuleManifest[] = [
     {
         id: 'iep',
         requiresPrivate: true,
+        requiresGeneratedName: true,
         defaultEnabled: false,
         creatorRole: 'administrator',
         isRole: () => true,

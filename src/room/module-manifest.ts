@@ -23,6 +23,17 @@ export interface IModuleManifest {
      * then enforced by the module's own declaration, not by an administrator remembering.
      */
     requiresPrivate: boolean;
+    /**
+     * Enabling this module means the room's NAME must not describe it: the name the creator typed
+     * becomes `Room.displayName`, and `Room.name` — the identifier in every URL, log line and
+     * referrer header — is generated instead.
+     *
+     * Declared by the module for the same reason `requiresPrivate` is. A room called
+     * `iep-jimmy-smith` puts a child's name in the address bar, and in an app with screen sharing
+     * that means into the recording of the meeting as well. Whether that matters is a fact about
+     * the module, not about the administrator's naming habits.
+     */
+    requiresGeneratedName: boolean;
     /** On for a new room unless the creator turns it off. True for the three that were never
      *  optional — chat, live and playback were simply what a room was. */
     defaultEnabled: boolean;
@@ -63,6 +74,12 @@ export function unknownModuleIds(catalog: IModuleManifest[], moduleIds: string[]
  *  them is `unknownModuleIds`'s job and happens first. */
 export function forcesPrivate(catalog: IModuleManifest[], moduleIds: string[]): boolean {
     return moduleIds.some((id) => findManifest(catalog, id)?.requiresPrivate === true);
+}
+
+/** Whether any of these modules requires the room's name to be generated rather than typed. Same
+ *  shape and same unknown-id stance as `forcesPrivate` above. */
+export function forcesGeneratedName(catalog: IModuleManifest[], moduleIds: string[]): boolean {
+    return moduleIds.some((id) => findManifest(catalog, id)?.requiresGeneratedName === true);
 }
 
 /** Every enabled module's capability resolver, for handing to `capabilitiesFor`. Derived from the

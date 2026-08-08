@@ -3,6 +3,7 @@ import { IModuleManifest, creatorRolesFor, defaultModuleIds, findManifest, force
 const manifest = (id: string, overrides: Partial<IModuleManifest> = {}): IModuleManifest => ({
     id,
     requiresPrivate: false,
+    requiresGeneratedName: false,
     defaultEnabled: true,
     creatorRole: null,
     isRole: () => false,

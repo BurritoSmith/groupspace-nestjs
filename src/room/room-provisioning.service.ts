@@ -1,7 +1,8 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthKind, IRoomContext, RoomRole } from './capabilities';
-import { IModuleManifest, MODULE_CATALOG, creatorRolesFor, defaultModuleIds, findManifest, forcesPrivate, unknownModuleIds } from './module-manifest';
+import { IModuleManifest, MODULE_CATALOG, creatorRolesFor, defaultModuleIds, findManifest, forcesGeneratedName, forcesPrivate, unknownModuleIds } from './module-manifest';
+import { generateRoomIdentifier } from './room-identifier';
 import { hashPasscode, isAcceptablePasscode, verifyPasscode } from './passcode';
 import { canonicalRoomName, isCreatableRoomName } from './room-name';
 
@@ -17,6 +18,10 @@ export interface ICreateRoomInput {
 
 export interface IRoomSummary {
     name: string;
+    /** The title to show when the name is a generated identifier; null for an ordinary room, where
+     *  the name is the title. Never render `name` in preference to this when it is set — that is
+     *  what puts a child's name back on screen. */
+    displayName: string | null;
     visibility: RoomVisibility;
     /** Whether a passcode is set — never the passcode, and never its digest. */
     hasPasscode: boolean;
@@ -48,7 +53,9 @@ export class RoomProvisioningService {
      * produces that if the writes are allowed to land separately.
      */
     async create(userId: string, input: ICreateRoomInput): Promise<IRoomSummary> {
-        const name = canonicalRoomName(input.name);
+        // Validated even when the typed name is about to become a displayName rather than the
+        // identifier: it is still shown to people, still stored, and the length and control-character
+        // rules exist for reasons that do not stop applying because it moved column.
         if (!isCreatableRoomName(input.name)) {
             throw new BadRequestException('That room name cannot be used.');
         }
@@ -60,6 +67,14 @@ export class RoomProvisioningService {
         if (unknown.length > 0) {
             throw new BadRequestException(`Unknown module(s): ${unknown.join(', ')}.`);
         }
+
+        // A module may declare that the room's name must not describe it. The typed title then
+        // becomes displayName and the identifier is generated — see room-identifier.ts for why the
+        // alphabet matters. Trimmed but NOT lowercased: displayName is a title shown to people, not
+        // a key anything is looked up by, so "Jimmy's Annual Review" should keep its capitals.
+        const generatedName = forcesGeneratedName(this.catalog, moduleIds);
+        const name = generatedName ? generateRoomIdentifier() : canonicalRoomName(input.name);
+        const displayName = generatedName ? input.name.trim() : null;
 
         // A module that demands privacy gets it, whatever the request asked for. Silently upgrading
         // rather than rejecting: the caller asked for something contradictory, and the safe reading
@@ -76,7 +91,7 @@ export class RoomProvisioningService {
         const creatorRoles = creatorRolesFor(this.catalog, moduleIds);
 
         await this.prisma.$transaction(async (tx) => {
-            await tx.room.create({ data: { name, visibility, passcodeHash, createdByUserId: userId } });
+            await tx.room.create({ data: { name, displayName, visibility, passcodeHash, createdByUserId: userId } });
             await tx.roomMember.create({ data: { roomName: name, userId, role: 'owner' } });
             await tx.roomModule.createMany({ data: moduleIds.map((moduleId) => ({ roomName: name, moduleId })) });
             if (creatorRoles.length > 0) {
@@ -86,7 +101,7 @@ export class RoomProvisioningService {
             }
         });
 
-        return { name, visibility, hasPasscode: passcodeHash !== null, moduleIds, createdByUserId: userId };
+        return { name, displayName, visibility, hasPasscode: passcodeHash !== null, moduleIds, createdByUserId: userId };
     }
 
     /** What a room is, for anyone allowed to ask. Null rather than throwing, because "does this
@@ -95,13 +110,14 @@ export class RoomProvisioningService {
         const name = canonicalRoomName(roomName);
         const room = await this.prisma.room.findUnique({
             where: { name },
-            select: { name: true, visibility: true, passcodeHash: true, createdByUserId: true, modules: { select: { moduleId: true } } },
+            select: { name: true, displayName: true, visibility: true, passcodeHash: true, createdByUserId: true, modules: { select: { moduleId: true } } },
         });
         if (!room) {
             return null;
         }
         return {
             name: room.name,
+            displayName: room.displayName,
             visibility: room.visibility as RoomVisibility,
             hasPasscode: room.passcodeHash !== null,
             moduleIds: room.modules.map((module) => module.moduleId),

@@ -6,6 +6,7 @@ import { RoomProvisioningService } from './room-provisioning.service';
 const manifest = (id: string, overrides: Partial<IModuleManifest> = {}): IModuleManifest => ({
     id,
     requiresPrivate: false,
+    requiresGeneratedName: false,
     defaultEnabled: true,
     creatorRole: null,
     isRole: () => false,
@@ -17,7 +18,13 @@ const catalog: IModuleManifest[] = [
     manifest('chat'),
     manifest('live'),
     manifest('playback'),
-    manifest('iep', { requiresPrivate: true, defaultEnabled: false, creatorRole: 'administrator', isRole: (value) => value === 'administrator' }),
+    manifest('iep', {
+        requiresPrivate: true,
+        requiresGeneratedName: true,
+        defaultEnabled: false,
+        creatorRole: 'administrator',
+        isRole: (value) => value === 'administrator',
+    }),
 ];
 
 function createFakePrisma() {
@@ -111,6 +118,60 @@ describe('RoomProvisioningService.create', () => {
         await expect(service.create('user-1', { name: 'standup' })).rejects.toBeInstanceOf(ConflictException);
     });
 
+    /*
+     * A room called `iep-jimmy-smith` puts a child's name in the address bar, and in an app with
+     * screen sharing that means in the recording of the meeting too. So a module can declare that
+     * the name must not describe the room: the typed title moves to displayName and the identifier
+     * is generated.
+     */
+    describe('with a module that demands a generated name', () => {
+        it('generates the identifier and keeps the typed title out of it', async () => {
+            const { service, fake } = createService();
+
+            const summary = await service.create('user-1', { name: 'IEP — Jimmy Smith', moduleIds: ['iep'] });
+
+            expect(summary.name).not.toContain('jimmy');
+            expect(summary.name).toMatch(/^[0-9abcdefghjkmnpqrstvwxyz]{16}$/);
+            expect(fake.room.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ name: summary.name }) }));
+        });
+
+        it('keeps the typed title as the display name, capitals and all', async () => {
+            const { service } = createService();
+
+            const summary = await service.create('user-1', { name: '  IEP — Jimmy Smith  ', moduleIds: ['iep'] });
+
+            // Trimmed but not lowercased: this is a title shown to people, not a key anything is
+            // looked up by.
+            expect(summary.displayName).toBe('IEP — Jimmy Smith');
+        });
+
+        it('gives two rooms asked for the same title different identifiers', async () => {
+            const { service } = createService();
+
+            const first = await service.create('user-1', { name: 'Annual Review', moduleIds: ['iep'] });
+            const second = await service.create('user-1', { name: 'Annual Review', moduleIds: ['iep'] });
+
+            expect(first.name).not.toBe(second.name);
+        });
+
+        it('still refuses a title that could never be used as a name', async () => {
+            const { service } = createService();
+
+            await expect(service.create('user-1', { name: '   ', moduleIds: ['iep'] })).rejects.toThrow('That room name cannot be used.');
+        });
+    });
+
+    /* An ordinary room's name IS its title. Duplicating it into displayName would create two things
+     * to keep in step, and every existing link depends on the name staying what was typed. */
+    it('leaves displayName null for a room whose name describes nothing sensitive', async () => {
+        const { service } = createService();
+
+        const summary = await service.create('user-1', { name: 'Standup', moduleIds: ['chat'] });
+
+        expect(summary.name).toBe('standup');
+        expect(summary.displayName).toBeNull();
+    });
+
     describe('with a module that demands privacy', () => {
         it('forces the room private even when public was asked for', async () => {
             const { service, fake } = createService();
@@ -122,10 +183,12 @@ describe('RoomProvisioningService.create', () => {
 
         it('gives the creator the role that module names, so somebody can run the meeting', async () => {
             const { service, fake } = createService();
-            await service.create('user-7', { name: 'iep-meeting', moduleIds: ['iep'] });
+            // Taken from the summary rather than written out: this module also demands a generated
+            // name, so the row is keyed by the identifier the service made, not by what was typed.
+            const summary = await service.create('user-7', { name: 'iep-meeting', moduleIds: ['iep'] });
 
             expect(fake.roomMemberModuleRole.createMany).toHaveBeenCalledWith({
-                data: [{ roomName: 'iep-meeting', userId: 'user-7', moduleId: 'iep', role: 'administrator' }],
+                data: [{ roomName: summary.name, userId: 'user-7', moduleId: 'iep', role: 'administrator' }],
             });
         });
     });

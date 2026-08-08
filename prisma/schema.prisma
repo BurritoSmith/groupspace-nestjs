@@ -74,6 +74,14 @@ model Invitation {
 
 model Room {
   name            String   @id // rooms have no separate UUID anywhere in this app — the name IS the identifier
+  // What the UI shows, when the name itself must not be shown. Null for every ordinary room, where
+  // the name IS the title and duplicating it here would create two things to keep in step.
+  //
+  // Set only when an enabled module declares requiresGeneratedName (see module-manifest.ts): the
+  // creator's typed title lands here and `name` above is generated instead. Deliberately never put
+  // in a URL, a log line, or a push notification — moving a child's name out of the address bar and
+  // onto a lock screen would not be an improvement. See PushNotificationService for that half.
+  displayName     String?
   createdAt       DateTime @default(now())
   // Nullable only because every room predating explicit creation has no recorded creator. The
   // migration backfills it from the earliest member, but a room whose members were all deleted has
