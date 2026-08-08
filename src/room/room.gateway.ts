@@ -59,6 +59,15 @@ import type {
  * are not in it": both answers, to someone who is not a member, are a membership oracle about a
  * child's education. The REST layer's invitation and capability errors take the same line.
  */
+/**
+ * Refusing a room that does not exist.
+ *
+ * Says only that it is unavailable. "No such room" and "you may not have this room" are the same
+ * sentence on purpose — distinguishing them would let anyone enumerate which rooms exist, which for
+ * a room named after a child is the whole question.
+ */
+export const NO_SUCH_ROOM_REFUSAL = 'That room is not available.';
+
 export const PRIVATE_ROOM_REFUSAL = 'This room is private. You need a passcode or an invitation to join it.';
 
 @WebSocketGateway({
@@ -225,7 +234,23 @@ export class RoomGateway implements OnGatewayDisconnect {
      */
     private async assertMayJoin(roomName: string, userId: string): Promise<void> {
         const summary = await this.roomProvisioningService.describe(roomName);
-        if (!summary || summary.visibility !== 'private') {
+        /*
+         * A room with no row is refused now, where it used to be waved through.
+         *
+         * `recordVisit` used to conjure one with a connectOrCreate, which is how every ownerless
+         * room in the database came to exist: nobody created them, somebody visited a URL. That is
+         * the thing Part 0 exists to stop, and leaving the socket permissive meant a typed or
+         * shared `/rooms/whatever` still walked straight past the create step.
+         *
+         * Clients ask `GET /rooms/:roomName` before joining and send anyone whose room does not
+         * exist to the create screen, so in practice this is the backstop rather than the message
+         * anybody reads — which matters, because a thrown WsException never reaches an ack callback
+         * (see the frontend's own note on that).
+         */
+        if (!summary) {
+            throw new WsException(NO_SUCH_ROOM_REFUSAL);
+        }
+        if (summary.visibility !== 'private') {
             return;
         }
         const context = await this.roomProvisioningService.contextFor(roomName, userId);
