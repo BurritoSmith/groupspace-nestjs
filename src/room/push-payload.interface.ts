@@ -4,6 +4,23 @@
 export interface IChatMessagePush {
     type: 'chat-message';
     roomName: string;
+    /**
+     * What the notification is titled, when the room's own name must not be shown.
+     *
+     * A private room may exist precisely because its subject is confidential — an IEP room's
+     * identifier is generated for that reason, and its readable title lives in `Room.displayName`.
+     * Sending EITHER of those here would defeat the point: the generated identifier is meaningless
+     * on a lock screen, and the display name is the child's name, which is the thing being kept out
+     * of URLs in the first place. Moving it from the address bar to a lock screen, in front of
+     * whoever is stood next to the parent, is not an improvement.
+     *
+     * So the server decides the whole title and the clients render it verbatim. Neither
+     * fcm-notification.ts nor push-sw.js knows what a private room is, and neither should.
+     *
+     * Optional: absent means "use roomName", which is right for an ordinary public room and is
+     * also what every payload built before this field existed will do.
+     */
+    title?: string;
     senderDisplayName: string;
     messageText: string;
     messageId: string;
@@ -29,6 +46,23 @@ export interface IChatMessagePush {
 export interface IPeerJoinedPush {
     type: 'peer-joined';
     roomName: string;
+    /**
+     * What the notification is titled, when the room's own name must not be shown.
+     *
+     * A private room may exist precisely because its subject is confidential — an IEP room's
+     * identifier is generated for that reason, and its readable title lives in `Room.displayName`.
+     * Sending EITHER of those here would defeat the point: the generated identifier is meaningless
+     * on a lock screen, and the display name is the child's name, which is the thing being kept out
+     * of URLs in the first place. Moving it from the address bar to a lock screen, in front of
+     * whoever is stood next to the parent, is not an improvement.
+     *
+     * So the server decides the whole title and the clients render it verbatim. Neither
+     * fcm-notification.ts nor push-sw.js knows what a private room is, and neither should.
+     *
+     * Optional: absent means "use roomName", which is right for an ordinary public room and is
+     * also what every payload built before this field existed will do.
+     */
+    title?: string;
     joinerDisplayName: string;
     tag: string;
     /** Same role as IChatMessagePush.senderPictureUrl — this notification never has an attachment

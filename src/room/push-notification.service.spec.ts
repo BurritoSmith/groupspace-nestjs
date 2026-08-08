@@ -11,6 +11,9 @@ function createService() {
         recordVisit: jest.fn(),
         listForUser: jest.fn(),
         listMembersWithProfile: jest.fn().mockResolvedValue([]),
+        // Null is the ordinary room: its name IS its title, so notifications carry no separate one.
+        // The private-room tests below override this.
+        findDisplayName: jest.fn().mockResolvedValue(null),
     };
     const fakePushSubscriptions = {
         register: jest.fn(),
@@ -70,6 +73,71 @@ describe('PushNotificationService', () => {
             configure(service);
 
             expect(webpush.setVapidDetails).toHaveBeenCalledWith('mailto:test@example.com', 'public-key', 'private-key');
+        });
+    });
+
+    /*
+     * A room whose name was GENERATED so its subject would not appear in a URL must not have that
+     * subject arrive on a lock screen instead. Sending either half of its identity would undo the
+     * point: the identifier is meaningless to a reader, and the display name is the child's name —
+     * which is exactly what the generated name exists to keep out of writing. A lock screen is read
+     * by whoever is stood next to the parent.
+     */
+    describe('what a notification is allowed to call a room', () => {
+        it('titles a room with a display name generically, naming neither half of its identity', async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
+            configure(service);
+            fakeRoomMembership.findDisplayName.mockResolvedValue('IEP — Jimmy Smith');
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Bee', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([
+                { id: 's1', endpoint: 'https://push.test/1', p256dh: 'k', auth: 'a', platform: 'web' },
+            ]);
+
+            await service.notifyChatMessage('e3k7mq20xbvr8h5a', 'user-1', 'Clay', 'hello', 'msg-1', new Set());
+
+            const payload = JSON.parse((webpush.sendNotification as jest.Mock).mock.calls[0][1] as string);
+            expect(payload.title).toBe('Converge');
+            expect(payload.title).not.toContain('Jimmy');
+            expect(payload.title).not.toContain('e3k7mq');
+        });
+
+        it('sends no title at all for an ordinary room, whose name IS its title', async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
+            configure(service);
+            fakeRoomMembership.findDisplayName.mockResolvedValue(null);
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Bee', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([
+                { id: 's1', endpoint: 'https://push.test/1', p256dh: 'k', auth: 'a', platform: 'web' },
+            ]);
+
+            await service.notifyChatMessage('standup', 'user-1', 'Clay', 'hello', 'msg-1', new Set());
+
+            const payload = JSON.parse((webpush.sendNotification as jest.Mock).mock.calls[0][1] as string);
+            // Absent, not undefined — an ordinary room's payload is byte-identical to what it was
+            // before this field existed.
+            expect('title' in payload).toBe(false);
+            expect(payload.roomName).toBe('standup');
+        });
+
+        /* This runs on every chat message. displayName is written once at room creation and never
+         * updated, which is what makes one lookup per room safe. */
+        it('looks a room up once, not once per message', async () => {
+            const { service, fakeRoomMembership, fakePushSubscriptions, fakeUserSettings } = createService();
+            configure(service);
+            fakeRoomMembership.findDisplayName.mockResolvedValue('IEP — Jimmy Smith');
+            fakeRoomMembership.listMembersWithProfile.mockResolvedValue([{ userId: 'user-2', displayName: 'Bee', pictureUrl: '' }]);
+            fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+            fakePushSubscriptions.listForUser.mockResolvedValue([
+                { id: 's1', endpoint: 'https://push.test/1', p256dh: 'k', auth: 'a', platform: 'web' },
+            ]);
+
+            await service.notifyChatMessage('e3k7mq20xbvr8h5a', 'user-1', 'Clay', 'one', 'msg-1', new Set());
+            await service.notifyChatMessage('e3k7mq20xbvr8h5a', 'user-1', 'Clay', 'two', 'msg-2', new Set());
+            await service.notifyChatMessage('e3k7mq20xbvr8h5a', 'user-1', 'Clay', 'three', 'msg-3', new Set());
+
+            expect(fakeRoomMembership.findDisplayName).toHaveBeenCalledTimes(1);
         });
     });
 
@@ -350,6 +418,80 @@ describe('PushNotificationService', () => {
 
             const sentPayload = JSON.parse((webpush.sendNotification as jest.Mock).mock.calls[0][1] as string);
             expect(sentPayload.joinerPictureUrl).toBe('https://lh3.googleusercontent.com/avatar');
+        });
+
+        describe('rejoin suppression', () => {
+            beforeEach(() => {
+                jest.useFakeTimers();
+                jest.setSystemTime(new Date('2026-08-07T12:00:00Z'));
+            });
+
+            afterEach(() => {
+                jest.useRealTimers();
+            });
+
+            function joiningRoom() {
+                const created = createService();
+                configure(created.service);
+                created.fakeRoomMembership.listMembersWithProfile.mockResolvedValue([
+                    { userId: 'user-1', displayName: 'Joiner', pictureUrl: '' },
+                    { userId: 'user-2', displayName: 'Existing', pictureUrl: '' },
+                ]);
+                created.fakeUserSettings.getAll.mockResolvedValue(enabledSettings);
+                created.fakePushSubscriptions.listForUser.mockResolvedValue([{ id: 'sub-1', endpoint: 'https://push.example/a', p256dh: 'p', auth: 'a' }]);
+                return created;
+            }
+
+            // The bug this exists for: a peer is keyed by socket.id, so a phone that briefly loses
+            // its radio comes back through MediaRoom.rejoinAfterReconnect() as a BRAND-NEW peer and
+            // re-runs the whole join path. Everyone else in the room was being buzzed a second time
+            // for someone who never actually went anywhere.
+            it('does not announce the same person rejoining the same room within the window', async () => {
+                const { service } = joiningRoom();
+
+                await service.notifyPeerJoined('lobby', 'user-1', 'Joiner', new Set());
+                jest.setSystemTime(new Date('2026-08-07T12:00:20Z'));
+                await service.notifyPeerJoined('lobby', 'user-1', 'Joiner', new Set());
+
+                expect(webpush.sendNotification).toHaveBeenCalledTimes(1);
+            });
+
+            // The other half of the trade — suppressing forever would mean someone who actually
+            // left a call and came back later slipped in silently, which is a real join and the
+            // whole reason the person-joined notification exists.
+            it('announces the same person again once the window has passed', async () => {
+                const { service } = joiningRoom();
+
+                await service.notifyPeerJoined('lobby', 'user-1', 'Joiner', new Set());
+                jest.setSystemTime(new Date('2026-08-07T12:05:00Z'));
+                await service.notifyPeerJoined('lobby', 'user-1', 'Joiner', new Set());
+
+                expect(webpush.sendNotification).toHaveBeenCalledTimes(2);
+            });
+
+            // Keyed on the pair, not on either half: a busy room would otherwise swallow the second
+            // person's arrival, and one person's reconnect would silence their arrival everywhere
+            // else they joined at the same time.
+            it('still announces a different person, and the same person in a different room', async () => {
+                const { service } = joiningRoom();
+
+                await service.notifyPeerJoined('lobby', 'user-1', 'Joiner', new Set());
+                await service.notifyPeerJoined('lobby', 'user-2', 'Someone Else', new Set());
+                await service.notifyPeerJoined('studio', 'user-1', 'Joiner', new Set());
+
+                expect(webpush.sendNotification).toHaveBeenCalledTimes(3);
+            });
+
+            // A chat message from someone who just joined is not a duplicate of anything — the
+            // suppression must not leak out of the join announcement into the rest of the service.
+            it('does not suppress a chat message from the person who just joined', async () => {
+                const { service } = joiningRoom();
+
+                await service.notifyPeerJoined('lobby', 'user-1', 'Joiner', new Set());
+                await service.notifyChatMessage('lobby', 'user-1', 'Joiner', 'hi', 'msg-1', new Set());
+
+                expect(webpush.sendNotification).toHaveBeenCalledTimes(2);
+            });
         });
     });
 

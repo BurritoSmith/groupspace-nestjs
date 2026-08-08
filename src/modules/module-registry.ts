@@ -20,6 +20,9 @@ import { iepManifest } from './iep/iep-manifest';
 const builtInManifest = (id: string): IModuleManifest => ({
     id,
     requiresPrivate: false,
+    // A room called "standup" describes nothing about anyone, and the one-tap recent-rooms path and
+    // every link ever shared depend on it staying what the creator typed.
+    requiresGeneratedName: false,
     defaultEnabled: true,
     creatorRole: null,
     // No roles of their own. Being in the room is the only status chat has ever recognised.

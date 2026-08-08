@@ -3,10 +3,11 @@ import { IModuleManifest } from './module-manifest';
 import { RoomInvitationService } from './room-invitation.service';
 
 const catalog: IModuleManifest[] = [
-    { id: 'chat', requiresPrivate: false, defaultEnabled: true, creatorRole: null, isRole: () => false, capabilities: null },
+    { id: 'chat', requiresPrivate: false, requiresGeneratedName: false, defaultEnabled: true, creatorRole: null, isRole: () => false, capabilities: null },
     {
         id: 'iep',
         requiresPrivate: true,
+        requiresGeneratedName: true,
         defaultEnabled: false,
         creatorRole: 'administrator',
         isRole: (value) => ['administrator', 'parent', 'instructor'].includes(value as string),
