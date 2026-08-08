@@ -11,6 +11,14 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.29.0] - 2026-08-08
+
+### Added
+
+- Give a room a name that says nothing, and a title that does ([#68](https://github.com/BurritoSmith/groupspace-nestjs/pull/68))
+- Stop a private room naming itself, and a rejoin re-announcing you ([#68](https://github.com/BurritoSmith/groupspace-nestjs/pull/68))
+- Make "most recent" mean something, and say which room it is ([#68](https://github.com/BurritoSmith/groupspace-nestjs/pull/68))
+
 ## [0.28.1] - 2026-08-08
 
 ### Changed
@@ -502,7 +510,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.1...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.1...v0.29.0
 [0.28.1]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.0...v0.28.1
 [0.28.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.15...v0.28.0
 [0.27.15]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.14...v0.27.15
