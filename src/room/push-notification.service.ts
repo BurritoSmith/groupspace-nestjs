@@ -6,7 +6,7 @@ import { FcmTokenService, IFcmTokenRow } from './fcm-token.service';
 import { FcmService } from './fcm.service';
 import { UserSettingsService } from './user-settings.service';
 import { PushPayload, chatMessageTag, peerJoinedTag } from './push-payload.interface';
-import { suppressNativeDuplicates } from './push-platform';
+import { dropSilentPushIntolerant, suppressNativeDuplicates } from './push-platform';
 
 /** web-push payloads have roughly a 4KB ceiling — this is nowhere near it, just a sane cap on how
  *  much of one message's text ever needs to show in a notification body. */
@@ -152,7 +152,13 @@ export class PushNotificationService implements OnModuleInit {
         // Same suppression as the notify path, for the same reason turned around: a subscription a
         // native app has taken over never had a notification shown on it, so there is nothing there
         // to dismiss.
-        const webTargets = suppressNativeDuplicates(subscriptions, tokens);
+        //
+        // Then, and only on this path, iOS is dropped as well: `dismiss-all` is the one payload that
+        // shows the user nothing, and a content-less push costs an iOS subscription its life (which
+        // send() below then finishes off by deleting the row on the resulting 410). See
+        // dropSilentPushIntolerant for the full reasoning. The notify paths are untouched — they
+        // always show something, so they are safe on iOS as they are.
+        const webTargets = dropSilentPushIntolerant(suppressNativeDuplicates(subscriptions, tokens));
         await Promise.all([...webTargets.map((sub) => this.send(sub, { type: 'dismiss-all' })), ...tokens.map((tok) => this.sendFcm(tok, { type: 'dismiss-all' }))]);
     }
 

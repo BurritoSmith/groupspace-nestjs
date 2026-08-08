@@ -60,3 +60,32 @@ export function suppressNativeDuplicates<T extends { platform: string }>(subscri
     const nativePlatforms = new Set(nativeTokens.map((token) => token.platform));
     return subscriptions.filter((subscription) => !nativePlatforms.has(subscription.platform));
 }
+
+/**
+ * Drops the subscriptions that must never be sent a CONTENT-LESS push — today only `dismiss-all`,
+ * the one payload in the union that shows the user nothing.
+ *
+ * iOS is the whole reason this exists. WebKit enforces the `userVisibleOnly: true` contract that
+ * every subscription is created under: if a push event ends without a notification actually on
+ * screen, it counts as a silent push, and after a few of them iOS revokes the subscription outright.
+ * push-sw.js's dismissAll() shows a throwaway notification and immediately closes it, which is
+ * enough to satisfy Chrome but leaves nothing displayed — so on iOS it reads as silent and burns a
+ * strike every single time.
+ *
+ * What makes that especially nasty rather than merely wasteful is what happens next: a revoked
+ * subscription answers 404/410, and PushNotificationService.send() treats that as expiry and DELETES
+ * the row. The user is never told. Their toggle still says notifications are on, and no notification
+ * ever arrives again — the exact "it worked for a bit, then just stopped" shape.
+ *
+ * Losing cross-device dismissal on iOS is a small, contained cost by comparison: at worst an already
+ * read notification sits in Notification Center until it is swiped away. Keeping the subscription
+ * alive is worth far more than tidying it up.
+ *
+ * Only 'ios' is filtered, and that is exhaustive rather than a guess — a legacy row at the 'web'
+ * default cannot be a hidden iOS one, because iOS web push could not be subscribed to at all before
+ * the frontend shipped a web app manifest (see src/index.html there). Android and desktop Chrome are
+ * happy with the show-then-close trick and keep the behaviour unchanged.
+ */
+export function dropSilentPushIntolerant<T extends { platform: string }>(subscriptions: readonly T[]): T[] {
+    return subscriptions.filter((subscription) => subscription.platform !== 'ios');
+}
