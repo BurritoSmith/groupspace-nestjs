@@ -34,6 +34,13 @@ export class RoomMembershipService {
         });
     }
 
+    /** A room's human title, or null when its name IS its title (every ordinary room). Written only
+     *  at creation and never updated, which is what lets callers cache the answer. */
+    async findDisplayName(roomName: string): Promise<string | null> {
+        const room = await this.prisma.room.findUnique({ where: { name: roomName }, select: { displayName: true } });
+        return room?.displayName ?? null;
+    }
+
     async listForUser(userId: string): Promise<IMyRoom[]> {
         const rows = await this.prisma.roomMember.findMany({
             where: { userId },

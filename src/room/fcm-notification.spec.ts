@@ -69,3 +69,67 @@ describe('fcmNotificationFor', () => {
         expect(fcmNotificationFor({ type: 'dismiss-all' })).toBeNull();
     });
 });
+
+/*
+ * A private room may exist precisely because its subject is confidential. Its own name must not be
+ * what a lock screen shows — moving a child's name out of the address bar and onto a notification,
+ * in front of whoever is stood next to the parent, would not be an improvement. The server decides
+ * the title; this file renders whatever it is told and knows nothing about privacy.
+ */
+describe('fcmNotificationFor — a title the server chose', () => {
+    it('prefers the supplied title over the room name for a message', () => {
+        const content = fcmNotificationFor({
+            type: 'chat-message',
+            roomName: 'e3k7mq20xbvr8h5a',
+            title: 'Converge',
+            senderDisplayName: 'Alice',
+            messageText: 'hello',
+            messageId: 'm1',
+            tag: 'chat:e3k7mq20xbvr8h5a',
+        });
+
+        expect(content?.title).toBe('Converge');
+    });
+
+    it('prefers the supplied title over the room name for a join', () => {
+        const content = fcmNotificationFor({
+            type: 'peer-joined',
+            roomName: 'e3k7mq20xbvr8h5a',
+            title: 'Converge',
+            joinerDisplayName: 'Alice',
+            tag: 'peer-joined:e3k7mq20xbvr8h5a',
+        });
+
+        expect(content?.title).toBe('Converge');
+    });
+
+    /* Absent is the ordinary public room, and every payload built before this field existed. */
+    it('falls back to the room name when the server sent no title', () => {
+        const content = fcmNotificationFor({
+            type: 'chat-message',
+            roomName: 'standup',
+            senderDisplayName: 'Alice',
+            messageText: 'hello',
+            messageId: 'm1',
+            tag: 'chat:standup',
+        });
+
+        expect(content?.title).toBe('standup');
+    });
+
+    /* The generated identifier is meaningless to a human and must never be what they are shown —
+     * this is the failure the title field exists to make impossible. */
+    it('never shows a generated identifier when a title was supplied', () => {
+        const content = fcmNotificationFor({
+            type: 'chat-message',
+            roomName: 'e3k7mq20xbvr8h5a',
+            title: 'Converge',
+            senderDisplayName: 'Alice',
+            messageText: 'hello',
+            messageId: 'm1',
+            tag: 'chat:e3k7mq20xbvr8h5a',
+        });
+
+        expect(content?.title).not.toContain('e3k7mq');
+    });
+});

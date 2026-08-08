@@ -40,13 +40,15 @@ export function fcmNotificationFor(payload: PushPayload): IFcmNotificationConten
             // Same shape push-sw.js composes for a single entry, so a message reads identically
             // whether it arrived over web push or FCM.
             return {
-                title: payload.roomName,
+                // See IChatMessagePush.title: the server decides this, because deciding it here
+                // would mean this file knowing which rooms are private and why.
+                title: payload.title ?? payload.roomName,
                 body: `${payload.senderDisplayName}: ${payload.messageText}`,
                 tag: payload.tag,
                 ...(payload.imageUrl ? { imageUrl: payload.imageUrl } : {}),
             };
         case 'peer-joined':
-            return { title: payload.roomName, body: `${payload.joinerDisplayName} joined`, tag: payload.tag };
+            return { title: payload.title ?? payload.roomName, body: `${payload.joinerDisplayName} joined`, tag: payload.tag };
         case 'app-update':
             // English only, unlike everything the app itself renders. The other two bodies dodge
             // localization by being pure user content (a name and their own message text); this one
