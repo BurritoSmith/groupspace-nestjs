@@ -11,6 +11,12 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.28.1] - 2026-08-08
+
+### Changed
+
+- Stop sending the silent dismiss-all push to iOS subscriptions (#67)
+
 ## [0.28.0] - 2026-08-07
 
 ### Added
@@ -496,7 +502,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.1...HEAD
+[0.28.1]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.0...v0.28.1
 [0.28.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.15...v0.28.0
 [0.27.15]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.14...v0.27.15
 [0.27.14]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.27.13...v0.27.14
