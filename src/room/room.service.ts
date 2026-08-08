@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { EventEmitter } from 'node:events';
+import * as os from 'node:os';
 import * as mediasoup from 'mediasoup';
 import { types as mediasoupTypes } from 'mediasoup';
 import {
@@ -62,11 +63,70 @@ const TRANSPORT_LISTEN_INFOS: mediasoupTypes.TransportListenInfo[] = (['udp', 't
     ...(MIN_PORT !== undefined && MAX_PORT !== undefined ? { portRange: { min: MIN_PORT, max: MAX_PORT } } : {}),
 }));
 
+/** The module-wide listen infos, narrowed to one worker's slice. */
+function listenInfosForRange(range: IWorkerPortRange): mediasoupTypes.TransportListenInfo[] {
+    return (['udp', 'tcp'] as const).map((protocol) => ({
+        protocol,
+        ip: LISTEN_IP,
+        ...(ANNOUNCED_IP ? { announcedAddress: ANNOUNCED_IP } : {}),
+        portRange: { min: range.minPort, max: range.maxPort },
+    }));
+}
+
+/**
+ * Ports reserved to each worker before another worker is worth having.
+ *
+ * A worker's slice has to cover every transport of every room living on it — two WebRTC transports
+ * per peer, plus RecordingService's PlainTransports — so slicing too thin trades a CPU ceiling for
+ * a port ceiling, which fails far more rudely (a join that cannot allocate a transport).
+ */
+const MIN_PORTS_PER_WORKER = 100;
+
+export interface IWorkerPortRange {
+    minPort: number;
+    maxPort: number;
+}
+
+/**
+ * Splits the configured RTP port range into one DISJOINT slice per worker.
+ *
+ * Disjoint is the whole point. mediasoup tracks port usage per Worker, so two workers handed the
+ * same range each believe a port is free and race to bind it — an intermittent "Address already in
+ * use" that looks like the recording port collision this file already documents above, but is not
+ * it. Partitioning makes the collision structurally impossible rather than unlikely.
+ *
+ * The count is min(CPUs, what the port range affords). mediasoup Workers are single-threaded, so
+ * more than one per core buys nothing; and the range is a hard, externally-imposed limit because it
+ * has to match the GCE firewall rule opened for it. Production today is 40000-40199 — 200 ports, so
+ * TWO workers. Widening that range (and the firewall rule with it) is what unlocks more.
+ *
+ * Pure and exported so the partitioning is unit-testable without spawning real workers.
+ */
+export function planWorkerPorts(cpuCount: number, minPort: number, maxPort: number, override?: number): IWorkerPortRange[] {
+    const totalPorts = maxPort - minPort + 1;
+    const affordable = Math.max(1, Math.floor(totalPorts / MIN_PORTS_PER_WORKER));
+    // An explicit override still cannot exceed what the ports allow — running out of ports is worse
+    // than running out of parallelism.
+    const wanted = override !== undefined && override > 0 ? override : Math.max(1, cpuCount);
+    const count = Math.max(1, Math.min(wanted, affordable));
+    const slice = Math.floor(totalPorts / count);
+    return Array.from({ length: count }, (_, index) => ({
+        minPort: minPort + index * slice,
+        // The last slice absorbs the remainder, so no port in the configured range goes unused.
+        maxPort: index === count - 1 ? maxPort : minPort + (index + 1) * slice - 1,
+    }));
+}
+
 @Injectable()
 export class RoomService implements OnModuleInit {
     private readonly logger = new Logger(RoomService.name);
-    private worker!: mediasoupTypes.Worker;
+    /** One entry per mediasoup Worker, each owning a disjoint slice of the RTP port range.
+     *  `routers` is the assignment load — see getOrCreateRouter. */
+    private readonly workers: { worker: mediasoupTypes.Worker; listenInfos: mediasoupTypes.TransportListenInfo[]; routers: number }[] = [];
     private readonly routersByRoom = new Map<string, mediasoupTypes.Router>();
+    /** The listen infos of the worker a room landed on. A room's transports MUST come from its own
+     *  worker's slice — using another worker's ports is exactly the double-bind this avoids. */
+    private readonly listenInfosByRoom = new Map<string, mediasoupTypes.TransportListenInfo[]>();
     private readonly audioLevelObserversByRoom = new Map<string, mediasoupTypes.AudioLevelObserver>();
     private readonly peers = new Map<string, IPeerState>();
 
@@ -75,17 +135,51 @@ export class RoomService implements OnModuleInit {
 
     constructor(private readonly recordingService: RecordingService) {}
 
+    /**
+     * Builds the Worker pool.
+     *
+     * A mediasoup Worker is single-threaded, so one Worker meant the ENTIRE SFU — every room, every
+     * peer, all forwarding — ran on one core no matter how many the machine had. That was the
+     * service's throughput ceiling and it had nothing to do with Node's own event loop.
+     */
     async onModuleInit(): Promise<void> {
-        this.worker = await mediasoup.createWorker({
-            logLevel: 'warn',
-            rtcMinPort: WORKER_MIN_PORT,
-            rtcMaxPort: WORKER_MAX_PORT,
-        });
-        this.worker.on('died', () => {
-            this.logger.error(`mediasoup worker died (pid ${this.worker.pid}) — exiting process`);
-            process.exit(1);
-        });
-        this.logger.log(`mediasoup worker created (pid ${this.worker.pid})`);
+        const override = process.env.MEDIASOUP_WORKERS ? Number(process.env.MEDIASOUP_WORKERS) : undefined;
+        const plan = planWorkerPorts(os.cpus().length, WORKER_MIN_PORT, WORKER_MAX_PORT, Number.isFinite(override) ? override : undefined);
+
+        for (const range of plan) {
+            const worker = await mediasoup.createWorker({
+                logLevel: 'warn',
+                rtcMinPort: range.minPort,
+                rtcMaxPort: range.maxPort,
+            });
+            // Unchanged from the single-worker behaviour, and deliberately so: a dead Worker takes
+            // its rooms' media with it and there is no way to rebuild them under the peers still
+            // connected. Exiting lets the supervisor restart cleanly rather than leaving a process
+            // that answers signalling for rooms whose media is gone.
+            worker.on('died', () => {
+                this.logger.error(`mediasoup worker died (pid ${worker.pid}) — exiting process`);
+                process.exit(1);
+            });
+            this.workers.push({
+                worker,
+                listenInfos: listenInfosForRange(range),
+                routers: 0,
+            });
+        }
+
+        const pids = this.workers.map((slot) => slot.worker.pid).join(', ');
+        this.logger.log(
+            `mediasoup pool: ${this.workers.length} worker(s) across ports ${WORKER_MIN_PORT}-${WORKER_MAX_PORT} ` +
+                `(${Math.floor((WORKER_MAX_PORT - WORKER_MIN_PORT + 1) / this.workers.length)} ports each, ${os.cpus().length} CPUs) — pids ${pids}`,
+        );
+        if (this.workers.length < os.cpus().length) {
+            // Says the quiet part out loud: the pool is port-bound, not CPU-bound, and the fix is a
+            // wider range plus the matching firewall rule — not a bigger machine.
+            this.logger.warn(
+                `mediasoup pool is limited by the RTP port range, not CPUs (${this.workers.length} worker(s) for ${os.cpus().length} CPUs). ` +
+                    `Widen MEDIASOUP_MIN_PORT/MAX_PORT and the firewall rule to use the rest.`,
+            );
+        }
     }
 
     private async getOrCreateRouter(roomName: string): Promise<mediasoupTypes.Router> {
@@ -93,8 +187,13 @@ export class RoomService implements OnModuleInit {
         if (existing) {
             return existing;
         }
-        const router = await this.worker.createRouter({ mediaCodecs: MEDIA_CODECS });
+        // Least-loaded rather than round-robin: rooms are wildly uneven and long-lived, so a
+        // rotation happily stacks three busy rooms on one worker while another sits idle.
+        const slot = this.workers.reduce((fewest, candidate) => (candidate.routers < fewest.routers ? candidate : fewest));
+        const router = await slot.worker.createRouter({ mediaCodecs: MEDIA_CODECS });
+        slot.routers += 1;
         this.routersByRoom.set(roomName, router);
+        this.listenInfosByRoom.set(roomName, slot.listenInfos);
         await this.createAudioLevelObserver(roomName, router);
         return router;
     }
@@ -215,7 +314,10 @@ export class RoomService implements OnModuleInit {
     async createTransport(peerId: string, direction: 'send' | 'recv') {
         const peer = this.requirePeer(peerId);
         const transport = await peer.router.createWebRtcTransport({
-            listenInfos: TRANSPORT_LISTEN_INFOS,
+            // This room's own worker's slice — never the module-wide range, which would let two
+            // workers hand out the same port. The fallback only fires for a peer whose room somehow
+            // has no recorded slice, where the old whole-range behaviour is still the safest guess.
+            listenInfos: this.listenInfosByRoom.get(peer.roomName) ?? TRANSPORT_LISTEN_INFOS,
             enableUdp: true,
             enableTcp: true,
             preferUdp: true,

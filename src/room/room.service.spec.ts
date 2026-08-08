@@ -1,4 +1,4 @@
-import { RoomService } from './room.service';
+import { RoomService, planWorkerPorts } from './room.service';
 import { IPeerState } from './interfaces/room.interfaces';
 
 function seedRouter(target: RoomService, roomName: string): void {
@@ -317,5 +317,69 @@ describe('RoomService', () => {
 
             expect(result.recordingStartedAt).toBeNull();
         });
+    });
+});
+
+/**
+ * The pool's whole safety property is that no two workers can be handed the same port. mediasoup
+ * tracks port usage per Worker, so an overlap is not caught anywhere at runtime — it surfaces as an
+ * intermittent bind failure under load, which is the worst possible way to find out.
+ */
+describe('planWorkerPorts', () => {
+    /** Production today: 40000-40199 from deploy/.env.example. */
+    const PROD_MIN = 40000;
+    const PROD_MAX = 40199;
+
+    it('never overlaps two workers, whatever the inputs', () => {
+        for (const cpus of [1, 2, 4, 8, 16]) {
+            for (const [min, max] of [
+                [PROD_MIN, PROD_MAX],
+                [10000, 10199],
+                [40000, 41999],
+                [1000, 1099],
+            ]) {
+                const ranges = planWorkerPorts(cpus, min, max);
+                for (let i = 1; i < ranges.length; i += 1) {
+                    expect(ranges[i].minPort).toBeGreaterThan(ranges[i - 1].maxPort);
+                }
+                expect(ranges[0].minPort).toBe(min);
+                // The last slice absorbs the remainder, so the configured range — which has to match
+                // the firewall rule — is fully used and never exceeded.
+                expect(ranges[ranges.length - 1].maxPort).toBe(max);
+            }
+        }
+    });
+
+    it('gives production two workers on its 200-port range', () => {
+        expect(planWorkerPorts(8, PROD_MIN, PROD_MAX)).toEqual([
+            { minPort: 40000, maxPort: 40099 },
+            { minPort: 40100, maxPort: 40199 },
+        ]);
+    });
+
+    // Ports are a hard external limit — the firewall rule has to match — so they cap the pool even
+    // on a machine with cores to spare. Running out of ports fails a join; running out of
+    // parallelism only makes things slower.
+    it('is capped by the port range rather than the CPU count', () => {
+        expect(planWorkerPorts(32, PROD_MIN, PROD_MAX)).toHaveLength(2);
+    });
+
+    it('never returns fewer than one worker, even for a range too small to slice', () => {
+        expect(planWorkerPorts(8, 40000, 40009)).toEqual([{ minPort: 40000, maxPort: 40009 }]);
+    });
+
+    it('uses no more workers than there are CPUs, since a worker is single-threaded', () => {
+        expect(planWorkerPorts(1, 40000, 41999)).toHaveLength(1);
+        expect(planWorkerPorts(3, 40000, 41999)).toHaveLength(3);
+    });
+
+    it('honours an explicit override, but still not past what the ports afford', () => {
+        expect(planWorkerPorts(1, 40000, 41999, 4)).toHaveLength(4);
+        expect(planWorkerPorts(1, PROD_MIN, PROD_MAX, 16)).toHaveLength(2);
+    });
+
+    it('ignores a nonsensical override rather than producing zero workers', () => {
+        expect(planWorkerPorts(4, PROD_MIN, PROD_MAX, 0)).toHaveLength(2);
+        expect(planWorkerPorts(4, PROD_MIN, PROD_MAX, -1)).toHaveLength(2);
     });
 });
