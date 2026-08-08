@@ -383,3 +383,114 @@ describe('planWorkerPorts', () => {
         expect(planWorkerPorts(4, PROD_MIN, PROD_MAX, -1)).toHaveLength(2);
     });
 });
+
+/**
+ * Routers used to live until the process restarted — created on first join, never closed. A server
+ * that had seen a thousand rooms held a thousand Routers and their observers, and the worker pool's
+ * least-loaded placement decayed into meaninglessness because every count only ever rose.
+ */
+describe('RoomService — releasing an empty room', () => {
+    let service: RoomService;
+    let stop: jest.Mock;
+    let router: { close: jest.Mock };
+    let slot: { routers: number };
+
+    function internals() {
+        return service as unknown as {
+            peers: Map<string, IPeerState>;
+            routersByRoom: Map<string, unknown>;
+            slotByRoom: Map<string, unknown>;
+            audioLevelObserversByRoom: Map<string, unknown>;
+        };
+    }
+
+    function seedPeer(peerId: string, roomName: string): void {
+        internals().peers.set(peerId, {
+            peerId,
+            userId: `user-${peerId}`,
+            displayName: 'Clay',
+            pictureUrl: '',
+            micSelfMuted: false,
+            focused: true,
+            roomName,
+            router: {} as never,
+            sendTransport: null,
+            recvTransport: null,
+            producers: new Map(),
+            consumers: new Map(),
+        });
+    }
+
+    beforeEach(() => {
+        stop = jest.fn().mockResolvedValue(undefined);
+        router = { close: jest.fn() };
+        slot = { routers: 1 };
+        service = new RoomService({
+            isRecording: jest.fn().mockReturnValue(false),
+            getRecordingStartedAt: jest.fn().mockReturnValue(null),
+            notifyProducerClosing: jest.fn(),
+            stop,
+        } as never);
+        internals().routersByRoom.set('honey', router);
+        internals().slotByRoom.set('honey', slot);
+        internals().audioLevelObserversByRoom.set('honey', {});
+    });
+
+    it('closes the router once the last peer leaves, and hands the load back', async () => {
+        seedPeer('peer-1', 'honey');
+
+        service.closePeer('peer-1');
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(router.close).toHaveBeenCalledTimes(1);
+        expect(internals().routersByRoom.has('honey')).toBe(false);
+        expect(internals().audioLevelObserversByRoom.has('honey')).toBe(false);
+        // Without this the pool keeps placing new rooms as though this one were still here.
+        expect(slot.routers).toBe(0);
+    });
+
+    it('keeps the router while anyone is still in the room', async () => {
+        seedPeer('peer-1', 'honey');
+        seedPeer('peer-2', 'honey');
+
+        service.closePeer('peer-1');
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(router.close).not.toHaveBeenCalled();
+        expect(internals().routersByRoom.has('honey')).toBe(true);
+    });
+
+    /** The close runs AFTER an awaited recording stop, so there is a real window in which someone
+     *  can rejoin. Closing then would pull the router out from under them. */
+    it('does not close the router when someone rejoins while the recording is being finalized', async () => {
+        seedPeer('peer-1', 'honey');
+        let finishStop: () => void = () => undefined;
+        stop.mockReturnValue(new Promise<void>((resolve) => { finishStop = resolve; }));
+
+        service.closePeer('peer-1');
+        seedPeer('peer-2', 'honey'); // rejoined mid-finalization
+        finishStop();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(router.close).not.toHaveBeenCalled();
+        expect(internals().routersByRoom.has('honey')).toBe(true);
+    });
+
+    /** stop() is best-effort; a failure there must not strand the router forever. */
+    it('still releases the router when stopping the recording rejects', async () => {
+        seedPeer('peer-1', 'honey');
+        stop.mockRejectedValue(new Error('ffmpeg went away'));
+        jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+
+        service.closePeer('peer-1');
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(router.close).toHaveBeenCalledTimes(1);
+    });
+});

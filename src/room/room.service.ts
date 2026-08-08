@@ -87,6 +87,14 @@ export interface IWorkerPortRange {
     maxPort: number;
 }
 
+interface IWorkerSlot {
+    worker: mediasoupTypes.Worker;
+    listenInfos: mediasoupTypes.TransportListenInfo[];
+    /** Rooms currently assigned. Drives least-loaded placement, so it must come back down when a
+     *  room closes or the pool silently degrades to "whichever worker started emptiest". */
+    routers: number;
+}
+
 /**
  * Splits the configured RTP port range into one DISJOINT slice per worker.
  *
@@ -120,13 +128,13 @@ export function planWorkerPorts(cpuCount: number, minPort: number, maxPort: numb
 @Injectable()
 export class RoomService implements OnModuleInit {
     private readonly logger = new Logger(RoomService.name);
-    /** One entry per mediasoup Worker, each owning a disjoint slice of the RTP port range.
-     *  `routers` is the assignment load — see getOrCreateRouter. */
-    private readonly workers: { worker: mediasoupTypes.Worker; listenInfos: mediasoupTypes.TransportListenInfo[]; routers: number }[] = [];
+    /** One entry per mediasoup Worker, each owning a disjoint slice of the RTP port range. */
+    private readonly workers: IWorkerSlot[] = [];
     private readonly routersByRoom = new Map<string, mediasoupTypes.Router>();
-    /** The listen infos of the worker a room landed on. A room's transports MUST come from its own
-     *  worker's slice — using another worker's ports is exactly the double-bind this avoids. */
-    private readonly listenInfosByRoom = new Map<string, mediasoupTypes.TransportListenInfo[]>();
+    /** The worker a room landed on. A room's transports MUST come from its own worker's slice —
+     *  using another worker's ports is exactly the double-bind the partitioning avoids — and closing
+     *  the room has to hand its load back to the worker that took it. */
+    private readonly slotByRoom = new Map<string, IWorkerSlot>();
     private readonly audioLevelObserversByRoom = new Map<string, mediasoupTypes.AudioLevelObserver>();
     private readonly peers = new Map<string, IPeerState>();
 
@@ -193,7 +201,7 @@ export class RoomService implements OnModuleInit {
         const router = await slot.worker.createRouter({ mediaCodecs: MEDIA_CODECS });
         slot.routers += 1;
         this.routersByRoom.set(roomName, router);
-        this.listenInfosByRoom.set(roomName, slot.listenInfos);
+        this.slotByRoom.set(roomName, slot);
         await this.createAudioLevelObserver(roomName, router);
         return router;
     }
@@ -317,7 +325,7 @@ export class RoomService implements OnModuleInit {
             // This room's own worker's slice — never the module-wide range, which would let two
             // workers hand out the same port. The fallback only fires for a peer whose room somehow
             // has no recorded slice, where the old whole-range behaviour is still the safest guess.
-            listenInfos: this.listenInfosByRoom.get(peer.roomName) ?? TRANSPORT_LISTEN_INFOS,
+            listenInfos: this.slotByRoom.get(peer.roomName)?.listenInfos ?? TRANSPORT_LISTEN_INFOS,
             enableUdp: true,
             enableTcp: true,
             preferUdp: true,
@@ -546,12 +554,61 @@ export class RoomService implements OnModuleInit {
         for (const producerId of removedProducerIds) {
             this.recordingService.notifyProducerClosing(peer.roomName, producerId);
         }
-        if (![...this.peers.values()].some((p) => p.roomName === peer.roomName)) {
-            void this.recordingService.stop(peer.roomName);
+        if (!this.isRoomOccupied(peer.roomName)) {
+            // Sequenced, not fired in parallel: closing a Router closes every transport under it,
+            // including the PlainTransports feeding the recording's ffmpeg processes. Closing while
+            // stop() is still finalizing would cut the RTP mid-write. stop() is best-effort by
+            // design, so the router is released either way.
+            const roomName = peer.roomName;
+            void this.recordingService
+                .stop(roomName)
+                .catch((error: unknown) => this.logger.error(`stopping the recording for ${roomName} failed: ${String(error)}`))
+                .finally(() => this.closeRoomIfEmpty(roomName));
         }
         peer.sendTransport?.close();
         peer.recvTransport?.close();
         return { roomName: peer.roomName, displayName: peer.displayName, userId: peer.userId, removedProducerIds };
+    }
+
+    private isRoomOccupied(roomName: string): boolean {
+        for (const peer of this.peers.values()) {
+            if (peer.roomName === roomName) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Releases an empty room's Router.
+     *
+     * Nothing used to do this: a Router was created on first join and lived until the process
+     * restarted, so a server that had seen a thousand rooms held a thousand Routers with their
+     * observers, and the pool's least-loaded placement steadily lost meaning as every worker's count
+     * only ever went up.
+     *
+     * Re-checks occupancy because it runs AFTER an awaited recording stop, and someone rejoining in
+     * that window would otherwise have the router closed underneath them. Closing a Router closes
+     * everything it owns — transports, producers, consumers, the AudioLevelObserver — so the maps
+     * are cleared rather than individually torn down.
+     */
+    private closeRoomIfEmpty(roomName: string): void {
+        if (this.isRoomOccupied(roomName)) {
+            return;
+        }
+        const router = this.routersByRoom.get(roomName);
+        if (!router) {
+            return;
+        }
+        router.close();
+        this.routersByRoom.delete(roomName);
+        this.audioLevelObserversByRoom.delete(roomName);
+        const slot = this.slotByRoom.get(roomName);
+        if (slot) {
+            slot.routers = Math.max(0, slot.routers - 1);
+            this.slotByRoom.delete(roomName);
+        }
+        this.logger.log(`closed the router for empty room ${roomName}`);
     }
 
     /** Snapshot of a room's router + every currently active producer, handed to RecordingService.start(). */
