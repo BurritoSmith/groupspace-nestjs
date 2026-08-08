@@ -68,8 +68,9 @@ always-on push daemon. iOS does. This is where that investment actually lands.
 
 ## Part 3 — Screen share
 
-The Android implementation is on `feature/android-screen-share` (not yet merged to `main` as of
-this writing). Its shape:
+The Android implementation is on `feature/android-screen-share` (~~not yet merged to `main` as of
+this writing~~ — **wrong: it was already merged.** `a8e1ca1`, PR #113, 2026-08-06 10:36, four minutes
+before this line was committed. Nothing to merge; the code is in `main`). Its shape:
 
 ```
 MediaProjection → MediaCodec (H.264 Annex-B, baseline 3.1)
@@ -105,6 +106,15 @@ needs a Share Extension, which is a second app target rather than a file in this
 now want that machinery, which is an argument for building it once, deliberately.
 
 ### The web end: `MediaStreamTrackGenerator` is not in WebKit
+
+> **CORRECTED 2026-08-08 — this section's conclusion is wrong, and so was the probe that "confirmed"
+> it.** `MediaStreamTrackGenerator` is the DEPRECATED name and it is exposed in WORKER scope, not on
+> `window`. The one-line check below tests `window.MediaStreamTrackGenerator` on the main thread,
+> where it returns `undefined` on every platform including ones that fully support the feature — so
+> it could not have detected the capability it was written to detect. WebKit ships the replacement,
+> `VideoTrackGenerator`, and **it works on this app's own WKWebView on a physical iPhone.** See the
+> 2026-08-08 section at the end. The web end does NOT break on iOS. The native end still does, for a
+> different reason measured the same day.
 
 WebKit bug 241124 — "Support Insertable Streams/MediaStreamTrackProcessor on Safari (both iOS and
 MacOS)" — is still open. WKWebView therefore very likely has no `MediaStreamTrackGenerator`, which
@@ -180,3 +190,107 @@ it after whichever of the two forces that decision first.
    shell can do.
 4. Nine locales for every new user-facing string, in the same commit. `locales.spec.ts` enforces it
    in both directions and will fail the build otherwise.
+
+
+---
+
+# 2026-08-08 — measured results
+
+Everything below was measured on hardware or read out of source, not reasoned about. Where it
+contradicts the plan above, the plan above is wrong and this section wins.
+
+## Part 2 (Push) — mostly done, and cheaper than scoped
+
+**Notification rendering and routing: DONE and verified**, without APNs. `xcrun simctl push` delivers
+to the simulator with no token and no entitlement. All four paths confirmed on iPhone 17 Pro / iOS
+26.5: foreground render (correct title/body/sound, tap routes to `/rooms/<name>?openChat=1` and lands
+on the Chat tab); backgrounded OS-drawn notification and tap; **cold start** — app killed, tap,
+routes correctly, so `consumePendingRoute()` works; and a control run proving a plain cold launch
+lands on the room chooser, i.e. the above was routing and not state restoration.
+
+Hand-testing note: the payload must be `data: { payload: "<json string>" }`, matching the backend's
+`fcm.service.ts:54`. Fields at the top level of `data` are silently ignored by `parsePayload`, which
+looks exactly like a broken app.
+
+**Found while verifying: `dismiss-all` was a no-op on BOTH native platforms.** `push-sw.js` has
+honoured it for the web all along; `native-push.ts` only early-returned, so a message read on one
+device left its notification on every other one — precisely what `signalActive()` exists to prevent.
+Fixed. **Live on Android** (`onMessageReceived` forwards data-only messages). **Still inert on iOS**:
+`@capacitor/push-notifications` has no silent-push path there at all — it handles registration plus
+VISIBLE notifications via the `UNUserNotificationCenter` delegate, and a `content-available` push
+never reaches that delegate. `UIBackgroundModes: [remote-notification]` is necessary but NOT
+sufficient; measured on the simulator, no JS listener fires with the key present. **Remaining work,
+not enrolment-gated: an `AppDelegate.didReceiveRemoteNotification` forwarding into the bridge.**
+
+**The APNs dependency question is resolved, and it shrinks this part.** `@capacitor-firebase/messaging@8.3.0`
+declares `firebase-ios-sdk` in its own `Package.swift`, and Capacitor's generated manifest includes
+every installed plugin as a local path package — so `npm i` + `cap sync` pulls Firebase in
+transitively. The gitignored-`Package.swift` problem disappears rather than being worked around. The
+plugin also already does `FirebaseApp.configure()` and sets `Messaging.messaging().apnsToken`, so
+**a hand-written `FcmTokenPlugin.swift` and the AppDelegate wiring are not needed**; the
+`FCM_TOKEN_PLUGIN` facade still is. `firebase` (the JS SDK) is an OPTIONAL peer dep, so no bundle cost.
+
+Coexistence with `@capacitor/push-notifications` is safe — keep both. `registerForRemoteNotifications()`
+is idempotent, and the APNs token reaches Firebase over NotificationCenter (a broadcast), so
+`getToken()` depends on nothing push-notifications owns. **The one real conflict** is a single slot:
+both assign `bridge.notificationRouter.pushNotificationHandler` in `load()`, last-writer-wins, and
+Capacitor logs `"Push notification handler overriding previous instance"`. It governs only foreground
+presentation and taps. Load order follows the generated `capacitor.config.json`, so watch for that
+log line.
+
+## Camera — DONE, zero code changes
+
+iPhone SE (3rd gen), portrait capture: `photo-….jpg type=image/jpeg 2.29MB 3024x4032`. Both untested
+assertions hold — JPEG not HEIC, and pixels genuinely rotated rather than EXIF-flagged.
+
+## Part 3 (Screen share) — buildable now, but the expensive way
+
+Three of this plan's blockers turned out not to be real, and the one that decides the cost was never
+identified.
+
+**Not blockers:**
+- **Apple enrolment is NOT required.** App Groups, Keychain Sharing and Background Modes are
+  available to free Apple Accounts, and a Broadcast Upload Extension needs no entitlement at all.
+  Paid enrolment blocks push, TestFlight and distribution — not this.
+- **`cap sync` will not fight a second app target.** The Capacitor CLI has no `pbxproj` handling
+  outside opt-in `migrate` tasks; sync only rewrites gitignored files. The real constraint is
+  narrower: the extension must never link `CapApp-SPM`, which is regenerated wholesale every sync.
+- **The web end works.** On Clay's iPhone SE, in the app's own WKWebView: a worker-scope
+  `VideoTrackGenerator` produced a live video track, transferred it to the main thread, and an
+  `RTCPeerConnection` offer carried `m=video` with **VP8** — the codec the router requires.
+  Main-thread readings were `VideoTrackGenerator=undefined MediaStreamTrackGenerator=undefined`,
+  which is exactly why the original probe drew the wrong conclusion.
+
+**The actual blocker: WKWebView stops executing when the app is backgrounded.** Measured on device
+in the most favourable configuration that could ship — `audio` declared in `UIBackgroundModes` AND a
+live mic stream held:
+
+```
+tick=34  dt=1010ms    workerFrames=33  visibility=hidden   ← backgrounded
+tick=35  dt=42181ms   workerFrames=34  visibility=hidden   ← 42s elapsed, ONE tick, ONE frame
+tick=36  dt=1005ms    workerFrames=35  visibility=visible  ← foregrounded
+```
+
+A 1s interval fired once in 42 seconds; the worker produced one frame instead of 42. Both the main
+thread and the worker suspend.
+
+That decides the architecture, and not for the reason this plan gives. Porting Android's pipeline
+would work — the generator exists — but its second half runs inside this WebView, so it stops the
+moment the user switches to the app they wanted to show. Foreground-only screen share means sharing
+Converge back into Converge.
+
+**So: Broadcast Upload Extension capturing via ReplayKit, with the WebRTC send side in Swift
+(`mediasoup-client-swift` — SPM-native, WebRTC M140, ~10.9MB device slice), entirely in the extension
+process.** Roughly 3–5 weeks. Scoped by measurement rather than by the guess this plan opened with.
+
+Two further constraints for whoever builds it:
+- **The router offers only Opus and VP8** (`room.service.ts:17-33`), and `recording.service.ts:1046`
+  stream-copies to `.webm` because of it. Adding H.264 for iOS hardware encode is not free — it
+  breaks recording.
+- **One send transport per peer, keyed by `direction`.** A second `create-transport{send}` silently
+  overwrites the slot and orphans the WebView's producers. Fixing this to key by id is ~1–1.5 days
+  and also closes a latent transport leak.
+
+Deliberately NOT measured: whether existing WebRTC audio/video keeps flowing while backgrounded.
+That is handled below JS by WebKit and may well continue. The measurement above says only that
+JavaScript stops — which is enough to kill any pipeline needing JS in the loop.
