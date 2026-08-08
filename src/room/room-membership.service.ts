@@ -3,6 +3,10 @@ import { PrismaService } from '../prisma/prisma.service';
 
 export interface IMyRoom {
     name: string;
+    /** What to CALL this room, when its name is a generated identifier. Null for an ordinary room,
+     *  whose name is already its title. Never send one WITHOUT the other: the name is what a click
+     *  navigates to, and the display name is the only part a person can recognise. */
+    displayName: string | null;
     lastJoinedAt: Date;
 }
 
@@ -30,7 +34,17 @@ export class RoomMembershipService {
                 user: { connect: { id: userId } },
                 room: { connectOrCreate: { where: { name: roomName }, create: { name: roomName } } },
             },
-            update: {},
+            /*
+             * Written explicitly, NOT left to `@updatedAt`.
+             *
+             * `update: {}` looks like the right way to say "the row already exists, just touch it",
+             * and it is the wrong one: Prisma skips the UPDATE altogether when there is no data to
+             * set, so @updatedAt never fires. lastJoinedAt then holds the moment the membership was
+             * CREATED, for the rest of its life — and every feature that ranks rooms by recency
+             * silently ranks them by first visit instead. Measured against the dev database: a room
+             * joined minutes ago still reported a timestamp from a fortnight earlier.
+             */
+            update: { lastJoinedAt: new Date() },
         });
     }
 
@@ -46,9 +60,12 @@ export class RoomMembershipService {
             where: { userId },
             orderBy: { lastJoinedAt: 'desc' },
             take: MY_ROOMS_LIMIT,
-            select: { roomName: true, lastJoinedAt: true },
+            // displayName comes along because a room whose NAME is a generated identifier has
+            // nothing readable about it — the join screen would list sixteen random characters and
+            // expect somebody to recognise their own meeting in it.
+            select: { roomName: true, lastJoinedAt: true, room: { select: { displayName: true } } },
         });
-        return rows.map((row) => ({ name: row.roomName, lastJoinedAt: row.lastJoinedAt }));
+        return rows.map((row) => ({ name: row.roomName, displayName: row.room.displayName, lastJoinedAt: row.lastJoinedAt }));
     }
 
     /** Live profile fields, not a point-in-time snapshot — this feeds a presence-style avatar
