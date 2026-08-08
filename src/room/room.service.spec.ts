@@ -494,3 +494,98 @@ describe('RoomService — releasing an empty room', () => {
         expect(router.close).toHaveBeenCalledTimes(1);
     });
 });
+
+/**
+ * Creating a Router is real I/O, so "get or create" has an await in the middle of it — and anything
+ * with an await in the middle of a check-then-act can run twice.
+ */
+describe('RoomService: two people joining one empty room at once', () => {
+    interface IProbeSlot {
+        worker: { createRouter: jest.Mock };
+        listenInfos: unknown[];
+        routers: number;
+    }
+
+    function serviceWithPool(slots: number): { service: RoomService; pool: IProbeSlot[]; built: { closed: boolean }[] } {
+        const built: { closed: boolean }[] = [];
+        const service = new RoomService({
+            isRecording: () => false,
+            getRecordingStartedAt: () => null,
+            stop: async () => undefined,
+            notifyProducerClosing: () => undefined,
+        } as never);
+        const pool: IProbeSlot[] = Array.from({ length: slots }, () => ({
+            worker: {
+                createRouter: jest.fn(async () => {
+                    // The delay is the point: without it there is no window to race in.
+                    await new Promise((resolve) => setTimeout(resolve, 5));
+                    const router = {
+                        closed: false,
+                        close: jest.fn(function (this: { closed: boolean }) {
+                            this.closed = true;
+                        }),
+                        createAudioLevelObserver: jest.fn(async () => ({ on: jest.fn() })),
+                        rtpCapabilities: {},
+                    };
+                    built.push(router);
+                    return router;
+                }),
+            },
+            listenInfos: [],
+            routers: 0,
+        }));
+        (service as unknown as { workers: IProbeSlot[] }).workers.push(...pool);
+        return { service, pool, built };
+    }
+
+    function peerRouters(service: RoomService): unknown[] {
+        const peers = (service as unknown as { peers: Map<string, IPeerState> }).peers;
+        return [...peers.values()].map((peer) => peer.router);
+    }
+
+    /* Both joiners used to get past the routersByRoom check, build a Router each, and end up on
+     * DIFFERENT ones — in the same room, unable to see or hear each other. */
+    it('puts both peers on one router', async () => {
+        const { service, built } = serviceWithPool(2);
+
+        await Promise.all([
+            service.joinRoom('peer-a', 'lobby', 'user-a', 'A', ''),
+            service.joinRoom('peer-b', 'lobby', 'user-b', 'B', ''),
+        ]);
+
+        expect(built).toHaveLength(1);
+        const [routerA, routerB] = peerRouters(service);
+        expect(routerA).toBe(routerB);
+    });
+
+    /* The second Router had nothing pointing at it, so the close-when-empty path could never find
+     * it — the very leak this pool was built to stop, surviving in the one case that creates two. */
+    it('leaves nothing open once the room empties', async () => {
+        const { service, pool, built } = serviceWithPool(2);
+        await Promise.all([
+            service.joinRoom('peer-a', 'lobby', 'user-a', 'A', ''),
+            service.joinRoom('peer-b', 'lobby', 'user-b', 'B', ''),
+        ]);
+
+        service.closePeer('peer-a');
+        service.closePeer('peer-b');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        expect(built.filter((router) => !router.closed)).toHaveLength(0);
+        // Back to zero, so least-loaded placement still means something on the next room.
+        expect(pool.map((slot) => slot.routers)).toEqual([0, 0]);
+    });
+
+    /* Claiming the slot only after createRouter resolves makes every simultaneous room see the same
+     * all-zero counts and pile onto worker 0 — round-robin with extra steps, and on one core. */
+    it('spreads simultaneous rooms across the pool', async () => {
+        const { service, pool } = serviceWithPool(2);
+
+        await Promise.all([
+            service.joinRoom('peer-a', 'lobby', 'user-a', 'A', ''),
+            service.joinRoom('peer-b', 'attic', 'user-b', 'B', ''),
+        ]);
+
+        expect(pool.map((slot) => slot.routers)).toEqual([1, 1]);
+    });
+});

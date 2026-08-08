@@ -135,6 +135,8 @@ export class RoomService implements OnModuleInit {
      *  using another worker's ports is exactly the double-bind the partitioning avoids — and closing
      *  the room has to hand its load back to the worker that took it. */
     private readonly slotByRoom = new Map<string, IWorkerSlot>();
+    /** Rooms whose Router is being built right now, so simultaneous joiners share one. */
+    private readonly routerCreations = new Map<string, Promise<mediasoupTypes.Router>>();
     private readonly audioLevelObserversByRoom = new Map<string, mediasoupTypes.AudioLevelObserver>();
     private readonly peers = new Map<string, IPeerState>();
 
@@ -195,11 +197,35 @@ export class RoomService implements OnModuleInit {
         if (existing) {
             return existing;
         }
+        // Two people clicking join on the same empty room a few milliseconds apart both used to get
+        // past the check above, because creating a Router is real I/O: two Routers were built, the
+        // map kept the second, and the first leaked forever with the two peers unable to see or
+        // hear each other because they were on DIFFERENT routers. Sharing the in-flight promise is
+        // what makes "get or create" actually mean it.
+        const inFlight = this.routerCreations.get(roomName);
+        if (inFlight) {
+            return inFlight;
+        }
+        const creation = this.createRouterFor(roomName).finally(() => this.routerCreations.delete(roomName));
+        this.routerCreations.set(roomName, creation);
+        return creation;
+    }
+
+    private async createRouterFor(roomName: string): Promise<mediasoupTypes.Router> {
         // Least-loaded rather than round-robin: rooms are wildly uneven and long-lived, so a
         // rotation happily stacks three busy rooms on one worker while another sits idle.
         const slot = this.workers.reduce((fewest, candidate) => (candidate.routers < fewest.routers ? candidate : fewest));
-        const router = await slot.worker.createRouter({ mediaCodecs: MEDIA_CODECS });
+        // Claimed BEFORE the await, not after: two different rooms starting together would both see
+        // the pre-increment counts and both pick worker 0, leaving worker 1 idle — least-loaded
+        // placement that only counts finished work is round-robin with extra steps.
         slot.routers += 1;
+        let router: mediasoupTypes.Router;
+        try {
+            router = await slot.worker.createRouter({ mediaCodecs: MEDIA_CODECS });
+        } catch (error) {
+            slot.routers -= 1;
+            throw error;
+        }
         this.routersByRoom.set(roomName, router);
         this.slotByRoom.set(roomName, slot);
         await this.createAudioLevelObserver(roomName, router);
