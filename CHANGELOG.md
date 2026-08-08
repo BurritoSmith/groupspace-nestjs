@@ -11,6 +11,13 @@ release per merged pull request, minor for `feature/` branches and patch for eve
 
 _Nothing yet._
 
+## [0.30.1] - 2026-08-08
+
+### Changed
+
+- Record what iOS actually measured, and correct two wrong claims (#70)
+- Run mediasoup on a worker pool, and release a room's router when it empties (#71)
+
 ## [0.30.0] - 2026-08-08
 
 ### Added
@@ -516,7 +523,8 @@ _Nothing yet._
 
 - Initial commit: mediasoup SFU backend with Google auth and recording
 
-[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.30.1...HEAD
+[0.30.1]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.1...v0.29.0
 [0.28.1]: https://github.com/BurritoSmith/groupspace-nestjs/compare/v0.28.0...v0.28.1
